@@ -1,6 +1,10 @@
 # review-audit-bot
 
+![Version](https://img.shields.io/badge/version-2.0-blue)
+
 Telegram-бот для аудита и проверки отзывов, построенный на [Nest.js](https://nestjs.com/).
+
+**Текущая версия:** `2.0`
 
 ## Описание
 

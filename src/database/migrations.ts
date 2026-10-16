@@ -145,8 +145,33 @@ ALTER TABLE telegram_outbox ADD COLUMN collection_run_id bigint REFERENCES colle
 CREATE UNIQUE INDEX one_collection_notification ON telegram_outbox(bot_id,collection_run_id) WHERE collection_run_id IS NOT NULL;
 CREATE INDEX collection_queue_idx ON collection_runs(next_attempt_at) WHERE status='pending';
 `;
+const analysisSql = `
+ALTER TABLE audit_runs
+ ADD COLUMN model text,
+ ADD COLUMN prompt_version text,
+ ADD COLUMN schema_version text,
+ ADD COLUMN attempts integer NOT NULL DEFAULT 0 CHECK(attempts BETWEEN 0 AND 3),
+ ADD COLUMN next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ ADD COLUMN worker_token uuid,
+ ADD COLUMN lease_until timestamptz,
+ ADD COLUMN error_code text,
+ ADD COLUMN analyzed_count integer NOT NULL DEFAULT 0,
+ ADD COLUMN notify_bot_id bigint,
+ ADD COLUMN notify_chat_id bigint;
+CREATE TABLE analysis_run_items (
+ audit_run_id bigint NOT NULL, project_id bigint NOT NULL, review_id bigint NOT NULL,
+ content_hash text NOT NULL,
+ PRIMARY KEY(audit_run_id,review_id),
+ FOREIGN KEY(audit_run_id,project_id) REFERENCES audit_runs(id,project_id) ON DELETE CASCADE,
+ FOREIGN KEY(review_id,project_id) REFERENCES reviews(id,project_id) ON DELETE CASCADE
+);
+ALTER TABLE telegram_outbox ADD COLUMN audit_run_id bigint REFERENCES audit_runs(id) ON DELETE CASCADE;
+CREATE UNIQUE INDEX one_analysis_notification ON telegram_outbox(bot_id,audit_run_id) WHERE audit_run_id IS NOT NULL;
+CREATE INDEX analysis_queue_idx ON audit_runs(next_attempt_at) WHERE status='pending' AND stage='analysis';
+`;
 export const migrations = [
  {version: '001_initial', sql, checksum: createHash('sha256').update(sql).digest('hex')},
  {version: '002_telegram', sql: telegramSql, checksum: createHash('sha256').update(telegramSql).digest('hex')},
- {version: '003_collection', sql: collectionSql, checksum: createHash('sha256').update(collectionSql).digest('hex')}
+ {version: '003_collection', sql: collectionSql, checksum: createHash('sha256').update(collectionSql).digest('hex')},
+ {version: '004_analysis', sql: analysisSql, checksum: createHash('sha256').update(analysisSql).digest('hex')}
 ];

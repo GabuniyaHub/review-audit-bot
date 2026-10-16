@@ -1,3 +1,5 @@
+import { AnalysisService } from '../../src/analysis/analysis.service.js';
+import { AnalysisError, PROMPT_VERSION, SCHEMA_VERSION } from '../../src/analysis/contract.js';
 import 'reflect-metadata';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -47,7 +49,7 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       assert.equal((await fetch(base+'/health/ready')).status,503);
     });
     await t.test('migration is applied once, concurrent repetitions are idempotent',async()=>{
-      assert.deepEqual(await migrate(pool),['001_initial','002_telegram','003_collection']);
+      assert.deepEqual(await migrate(pool),['001_initial','002_telegram','003_collection','004_analysis']);
       assert.deepEqual(await Promise.all([migrate(pool),migrate(pool)]),[[],[]]);
       assert.equal((await fetch(base+'/health/ready')).status,200);
     });
@@ -94,7 +96,7 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       assert.equal(await send(20001,'/settings','group'),undefined);
       await send(20001,'/setup');await send(20001,'Replacement');await send(20001,'/cancel');
       assert.match((await send(20001,'/settings'))!,/Garden/);
-      assert.match((await send(20001,'/report'))!,/анализ будет подключён/);
+      assert.match((await send(20001,'/report'))!,/Полный отчёт будет подключён/);
       assert.equal((await pool.query('SELECT count(*)::int AS n FROM audit_runs a JOIN audit_projects p ON a.project_id=p.id JOIN users u ON p.user_id=u.id WHERE u.telegram_user_id=20001')).rows[0].n,0);
       const project=(await pool.query('SELECT tp.project_id FROM telegram_profiles tp JOIN users u ON tp.user_id=u.id WHERE u.telegram_user_id=20001')).rows[0].project_id;
       const run=(await pool.query("INSERT INTO audit_runs(project_id,status) VALUES($1,'completed') RETURNING id",[project])).rows[0].id;
@@ -183,6 +185,33 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       const abandoned=await enqueue();await pool.query("UPDATE collection_runs SET status='running',attempts=3,lease_until=now()-interval '1 minute' WHERE id=$1",[abandoned]);
       await service.processNext();assert.equal((await pool.query('SELECT status FROM collection_runs WHERE id=$1',[abandoned])).rows[0].status,'failed');
       assert.match(await send(30001,'/status'),/ошибка/);
+    });
+    await t.test('analysis queue scopes users, caches versions, reanalyzes edits and rejects fabricated evidence',async()=>{
+      const database=app!.get(DatabaseService);const config={...settings,analysisEnabled:true,llmApiKey:'test',analysisBatchSize:2};
+      const uid=(await pool.query('INSERT INTO users(telegram_user_id) VALUES(909091) RETURNING id')).rows[0].id;
+      const project=(await pool.query("INSERT INTO audit_projects(user_id,name) VALUES($1,'Analysis pilot') RETURNING id",[uid])).rows[0].id;
+      await pool.query('INSERT INTO telegram_profiles(user_id,project_id) VALUES($1,$2)',[uid,project]);
+      const org=(await pool.query("INSERT INTO organizations(project_id,role,name,city,address) VALUES($1,'own','Garden','Tyumen','Malygina') RETURNING id",[project])).rows[0].id;
+      const card=(await pool.query("INSERT INTO source_cards(project_id,organization_id,source,external_id,url) VALUES($1,$2,'yandex','123','https://yandex.ru/maps/org/123/reviews/') RETURNING id",[project,org])).rows[0].id;
+      const review=(await pool.query("INSERT INTO reviews(project_id,source_card_id,dedup_key,text,content_hash) VALUES($1,$2,'test','Анна: кофе вкусный',$3) RETURNING id",[project,card,'a'.repeat(64)])).rows[0].id;
+      const bot=new BotService(database,config);let update=9000;
+      const command=async()=>bot.processUpdate(991,{update_id:update++,message:{message_id:update,chat:{id:909091,type:'private'},from:{id:909091},text:'/analyze'}});
+      let calls=0;const service=new AnalysisService(database,config,{analyze:async(inputs)=>{calls++;assert.equal(inputs.length,1);assert.ok(!inputs[0].text.includes('Анна'));return inputs.map(i=>({reviewId:i.id,sentiment:'positive',topics:[{topic:'product',sentiment:'positive',evidence:'кофе вкусный'}]}));}});
+      await command();await command();assert.equal((await pool.query("SELECT count(*) FROM audit_runs WHERE project_id=$1 AND status='pending'",[project])).rows[0].count,'1');
+      assert.equal(await service.processNext(),true);assert.equal(calls,1);
+      assert.equal((await pool.query('SELECT count(*) FROM review_analyses WHERE project_id=$1',[project])).rows[0].count,'1');
+      await command();assert.equal(await service.processNext(),false);assert.equal(calls,1);
+      await pool.query('UPDATE reviews SET content_hash=$2 WHERE id=$1',[review,'b'.repeat(64)]);await command();await service.processNext();assert.equal(calls,2);
+      assert.equal((await pool.query('SELECT count(*) FROM review_analyses WHERE project_id=$1',[project])).rows[0].count,'2');
+      await pool.query('UPDATE reviews SET content_hash=$2 WHERE id=$1',[review,'c'.repeat(64)]);await command();
+      const bad=new AnalysisService(database,config,{analyze:async()=>[{reviewId:review,sentiment:'negative',topics:[{topic:'service',sentiment:'negative',evidence:'выдуманная цитата'}]}]});await bad.processNext();
+      assert.equal((await pool.query('SELECT status,error_code FROM audit_runs WHERE project_id=$1 ORDER BY id DESC LIMIT 1',[project])).rows[0].error_code,'invalid_response');
+      assert.equal((await pool.query('SELECT count(*) FROM review_analyses WHERE project_id=$1',[project])).rows[0].count,'2');
+      await command();await pool.query('UPDATE reviews SET content_hash=$2 WHERE id=$1',[review,'d'.repeat(64)]);await service.processNext();
+      assert.equal((await pool.query('SELECT status FROM audit_runs WHERE project_id=$1 ORDER BY id DESC LIMIT 1',[project])).rows[0].status,'partial');
+      // Failed/partial snapshots do not prevent a new explicit run; recover a crashed lease.
+      await command();await pool.query("UPDATE audit_runs SET status='running',attempts=1,lease_until=now()-interval '1 minute' WHERE project_id=$1 AND status='pending'",[project]);await service.processNext();assert.equal(calls,3);
+      const sent=(await pool.query('SELECT count(*) FROM telegram_outbox WHERE audit_run_id IN(SELECT id FROM audit_runs WHERE project_id=$1)',[project])).rows[0].count;assert.equal(sent,'5');
     });
     await t.test('production entry point starts and shuts down cleanly',async()=>{
       const httpPort=await freePort();

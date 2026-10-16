@@ -1,10 +1,11 @@
+import { PROMPT_VERSION, SCHEMA_VERSION } from '../analysis/contract.js';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { PoolClient } from 'pg';
 import { Settings, SETTINGS } from '../config/settings.js';
 import { DatabaseService } from '../database/database.service.js';
 import { advance, prompt, Step } from './dialog.js';
 import { SetupDraft, TelegramUpdate } from './types.js';
-const HELP='/sources — проверить карточки\n/confirm ID — подтвердить филиал\n/collect — собрать отзывы\n/setup — настроить компанию и до трёх конкурентов\n/settings — посмотреть сохранённые настройки\n/status — состояние аудита\n/report — последний отчёт\n/resume — продолжить настройку\n/cancel — отменить черновик\n/help — справка';
+const HELP='/analyze — анализ собранных отзывов\n/sources — проверить карточки\n/confirm ID — подтвердить филиал\n/collect — собрать отзывы\n/setup — настроить компанию и до трёх конкурентов\n/settings — посмотреть сохранённые настройки\n/status — состояние аудита\n/report — последний отчёт\n/resume — продолжить настройку\n/cancel — отменить черновик\n/help — справка';
 @Injectable()
 export class BotService {
   constructor(@Inject(DatabaseService) private readonly database: DatabaseService, @Optional() @Inject(SETTINGS) private readonly settings?:Settings) {}
@@ -70,15 +71,25 @@ export class BotService {
         if(card.source==='2gis'&&this.settings.twoGisMode!=='browser'&&!this.settings.twoGisReviewsKey){unavailable++;continue;}
         const result=await db.query("INSERT INTO collection_runs(project_id,source_card_id,max_reviews,notify_bot_id,notify_chat_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING id",[profile.id,card.id,this.settings.collectionMaxReviews,botId,chatId]);queued+=result.rowCount??0;
       }
-      return `Заданий на сбор добавлено: ${queued}. ${verified.length-unavailable-queued} уже выполняются или ожидают. ${cards.length-verified.length} карточек не подтверждены.${unavailable?' Часть источников пока не подключена.':''} Лимит: ${this.settings.collectionMaxReviews} отзывов на карточку. /status — проверить. Анализ будет подключён отдельно.`;
+      return `Заданий на сбор добавлено: ${queued}. ${verified.length-unavailable-queued} уже выполняются или ожидают. ${cards.length-verified.length} карточек не подтверждены.${unavailable?' Часть источников пока не подключена.':''} Лимит: ${this.settings.collectionMaxReviews} отзывов на карточку. /status — проверить. /analyze — анализ собранных отзывов.`;
+    }
+    if(text==='/analyze') {
+      if(!profile)return 'Сначала настройте компанию: /setup.';
+      if(!this.settings?.analysisEnabled)return 'Анализ пока отключён. Настройки доступа к LLM проверяются.';
+      const pending=(await db.query(`SELECT r.id,r.content_hash FROM reviews r WHERE r.project_id=$1 AND length(trim(r.text))>0 AND length(r.text)<=12000 AND NOT EXISTS(SELECT 1 FROM review_analyses a WHERE a.review_id=r.id AND a.content_hash=r.content_hash AND a.model=$2 AND a.prompt_version=$3 AND a.schema_version=$4) ORDER BY r.id LIMIT 1000`,[profile.id,this.settings.llmModel,PROMPT_VERSION,SCHEMA_VERSION])).rows;
+      if(!pending.length)return 'Новых текстовых отзывов для анализа нет. Сначала /collect. Пустые тексты и тексты длиннее 12000 символов не отправляются.';
+      const run=(await db.query("INSERT INTO audit_runs(project_id,stage,model,prompt_version,schema_version,notify_bot_id,notify_chat_id) VALUES($1,'analysis',$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING id",[profile.id,this.settings.llmModel,PROMPT_VERSION,SCHEMA_VERSION,botId,chatId])).rows[0];
+      if(!run)return 'Аудит уже ожидает или выполняется. /status — состояние.';
+      for(const r of pending)await db.query('INSERT INTO analysis_run_items(audit_run_id,project_id,review_id,content_hash) VALUES($1,$2,$3,$4)',[run.id,profile.id,r.id,r.content_hash]);
+      return `Анализ поставлен в очередь: ${pending.length} отзывов (лимит одного запуска — 1000). Контактные данные и слова с заглавной буквы маскируются перед отправкой в LLM. /status — состояние.`;
     }
     if(text==='/status'||text==='/report') {
       if(!profile) return 'Сначала настройте свою компанию: /setup.';
-      const audit=(await db.query('SELECT id,status,stage,created_at FROM audit_runs WHERE project_id=$1 ORDER BY id DESC LIMIT 1',[profile.id])).rows[0];
+      const audit=(await db.query('SELECT id,status,stage,created_at,analyzed_count,error_code FROM audit_runs WHERE project_id=$1 ORDER BY id DESC LIMIT 1',[profile.id])).rows[0];
       if(text==='/report') {
         const report=(await db.query('SELECT r.summary,r.created_at FROM reports r JOIN audit_projects p ON p.id=r.project_id WHERE r.project_id=$1 AND p.user_id=$2 ORDER BY r.id DESC LIMIT 1',[profile.id,user])).rows[0];
         if(report) return `Отчёт от ${new Date(report.created_at).toISOString()}:\n${String(report.summary).slice(0,3400)}`;
-        return 'Отчёта пока нет. Настройки сохранены; анализ будет подключён на следующих этапах; сбор доступен через /collect. Пустой аудит не создаётся.';
+        return 'Отчёта пока нет. Настройки сохранены; /collect — сбор, /analyze — анализ. Полный отчёт будет подключён отдельно. Пустой аудит не создаётся.';
       }
       const collected=(await db.query(`SELECT sc.source,o.name,cr.status,cr.collected_count,cr.error_code,cr.stop_reason FROM source_cards sc JOIN organizations o ON o.id=sc.organization_id LEFT JOIN LATERAL(SELECT * FROM collection_runs r WHERE r.source_card_id=sc.id ORDER BY id DESC LIMIT 1)cr ON true WHERE sc.project_id=$1 ORDER BY sc.id`,[profile.id])).rows;
       const collectionStatuses:Record<string,string>={pending:'ожидает',running:'собирается',completed:'обработаны доступные страницы',partial:'частичная выборка',failed:'ошибка'};
@@ -87,14 +98,14 @@ export class BotService {
 
       const statuses:Record<string,string>={pending:'ожидает',running:'выполняется',completed:'завершён',partial:'завершён частично',failed:'ошибка'};
       const stages:Record<string,string>={collection:'сбор отзывов',analysis:'анализ',report:'отчёт'};
-      return `Последний аудит: ${statuses[audit.status]??'неизвестно'}. Этап: ${stages[audit.stage]??'неизвестно'}. Дата: ${new Date(audit.created_at).toISOString()}.`;
+      return summary+`\nПоследний аудит: ${statuses[audit.status]??'неизвестно'}. Этап: ${stages[audit.stage]??'неизвестно'}. Дата: ${new Date(audit.created_at).toISOString()}. Анализов в запуске: ${audit.analyzed_count??0}.${audit.error_code?' Причина: '+audit.error_code+'.':''}`;
     }
     if(!session) return 'Неизвестная команда. /help — список команд, /setup — настройка.';
     const next=advance(session.step,session.payload,text);
     if(next.save) {
       await this.saveProject(db,user,next.draft);
       await db.query('DELETE FROM telegram_sessions WHERE user_id=$1',[user]);
-      return 'Настройки сохранены. /settings — проверить, /status — состояние. Сбор и анализ пока не подключены.';
+      return 'Настройки сохранены. /settings — проверить, /status — состояние. /collect — сбор, /analyze — анализ.';
     }
     await db.query('UPDATE telegram_sessions SET step=$2,payload=$3,updated_at=now() WHERE user_id=$1',[user,next.step,next.draft]);
     // Four full organization URLs and short fields fit below Telegram's 4096 limit.

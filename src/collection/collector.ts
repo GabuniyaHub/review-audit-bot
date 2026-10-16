@@ -1,3 +1,4 @@
+import { twoGisBrowserPages } from './twogis-browser.js';
 import { load } from 'cheerio';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Settings } from '../config/settings.js';
@@ -30,6 +31,7 @@ export class SourceCollector implements ReviewCollector {
   constructor(private readonly settings:Settings,private readonly http=new SourceHttpClient(undefined,settings.collectionTimeoutMs)) {}
   async *pages(target:SourceTarget,signal?:AbortSignal):AsyncGenerator<ReviewPage> {
     if(!/^\d{1,20}$/.test(target.externalId))throw new CollectionError('invalid_data');
+    if(target.source==='2gis'&&this.settings.twoGisMode==='browser'){yield* twoGisBrowserPages(this.settings,target,signal);return;}
     if(target.source==='2gis'&&!this.settings.twoGisReviewsKey)throw new CollectionError('not_configured');
     const limit=target.maxReviews??this.settings.collectionMaxReviews;
     if(!Number.isInteger(limit)||limit<1||limit>1000)throw new CollectionError('invalid_data');const seen=new Set<string>();let accepted=0;

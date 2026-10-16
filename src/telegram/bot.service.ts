@@ -67,7 +67,7 @@ export class BotService {
       if(!verified.length)return 'Сначала проверьте филиалы: /sources, затем /confirm ID.';
       let queued=0;let unavailable=0;
       for(const card of verified) {
-        if(card.source==='2gis'&&!this.settings.twoGisReviewsKey){unavailable++;continue;}
+        if(card.source==='2gis'&&this.settings.twoGisMode!=='browser'&&!this.settings.twoGisReviewsKey){unavailable++;continue;}
         const result=await db.query("INSERT INTO collection_runs(project_id,source_card_id,max_reviews,notify_bot_id,notify_chat_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING id",[profile.id,card.id,this.settings.collectionMaxReviews,botId,chatId]);queued+=result.rowCount??0;
       }
       return `Заданий на сбор добавлено: ${queued}. ${verified.length-unavailable-queued} уже выполняются или ожидают. ${cards.length-verified.length} карточек не подтверждены.${unavailable?' Часть источников пока не подключена.':''} Лимит: ${this.settings.collectionMaxReviews} отзывов на карточку. /status — проверить. Анализ будет подключён отдельно.`;

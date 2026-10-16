@@ -1,7 +1,7 @@
 export interface Settings {
   nodeEnv: 'development' | 'test' | 'production'; host: string; port: number;
   databaseUrl: string; dbPoolMax: number; dbConnectTimeoutMs: number;
-  dbQueryTimeoutMs: number; dbSsl: boolean;
+  dbQueryTimeoutMs: number; dbSsl: boolean; telegramEnabled: boolean; telegramBotToken: string;
 }
 export const SETTINGS = Symbol('SETTINGS');
 export function readSettings(env: NodeJS.ProcessEnv = process.env): Settings {
@@ -24,11 +24,16 @@ export function readSettings(env: NodeJS.ProcessEnv = process.env): Settings {
   if (!host.trim() || /\s/.test(host)) errors.push('HOST');
   const ssl = env.DB_SSL ?? 'false';
   if (!['true', 'false'].includes(ssl)) errors.push('DB_SSL');
+  const telegramEnabled = env.TELEGRAM_ENABLED ?? 'false';
+  if (!['true','false'].includes(telegramEnabled)) errors.push('TELEGRAM_ENABLED');
+  const telegramBotToken = env.TELEGRAM_BOT_TOKEN?.trim() ?? '';
+  if (telegramEnabled === 'true' && !/^\d+:[A-Za-z0-9_-]{20,}$/.test(telegramBotToken)) errors.push('TELEGRAM_BOT_TOKEN');
   const settings: Settings = {nodeEnv: nodeEnv as Settings['nodeEnv'], host,
     port: integer('PORT',3000,1,65535), databaseUrl,
     dbPoolMax: integer('DB_POOL_MAX',5,1,50),
     dbConnectTimeoutMs: integer('DB_CONNECT_TIMEOUT_MS',5000,100,60000),
-    dbQueryTimeoutMs: integer('DB_QUERY_TIMEOUT_MS',10000,100,300000), dbSsl: ssl === 'true'};
+    dbQueryTimeoutMs: integer('DB_QUERY_TIMEOUT_MS',10000,100,300000), dbSsl: ssl === 'true', telegramEnabled: telegramEnabled === 'true', telegramBotToken};
+  if (settings.telegramEnabled && settings.dbPoolMax < 2) errors.push('DB_POOL_MAX');
   if (errors.length) throw new Error(`Invalid configuration: ${[...new Set(errors)].join(', ')}`);
   return settings;
 }

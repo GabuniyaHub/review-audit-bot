@@ -85,4 +85,38 @@ CREATE TABLE reports (
  created_at timestamptz NOT NULL DEFAULT now(),
  FOREIGN KEY (audit_run_id,project_id) REFERENCES audit_runs(id,project_id) ON DELETE CASCADE
 );`;
-export const migrations = [{version: '001_initial', sql, checksum: createHash('sha256').update(sql).digest('hex')}];
+const telegramSql = `
+ALTER TABLE audit_projects ADD CONSTRAINT project_owner_pair UNIQUE (id,user_id);
+CREATE TABLE telegram_profiles (
+ user_id bigint PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ project_id bigint NOT NULL,
+ FOREIGN KEY(project_id,user_id) REFERENCES audit_projects(id,user_id) ON DELETE CASCADE
+);
+CREATE TABLE telegram_sessions (
+ user_id bigint PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ step text NOT NULL CHECK(step IN ('name','city','address','2gis','yandex','next','confirm')),
+ payload jsonb NOT NULL CHECK(jsonb_typeof(payload)='object'),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE telegram_updates (
+ bot_id bigint NOT NULL, update_id bigint NOT NULL,
+ processed_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(bot_id,update_id)
+);
+CREATE TABLE telegram_outbox (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ bot_id bigint NOT NULL, update_id bigint NOT NULL,
+ chat_id bigint NOT NULL CHECK(chat_id > 0), text text NOT NULL CHECK(length(text) BETWEEN 1 AND 4096),
+ status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','failed')),
+ attempts integer NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+ next_attempt_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now(),
+ sent_at timestamptz,
+ FOREIGN KEY(bot_id,update_id) REFERENCES telegram_updates(bot_id,update_id) ON DELETE CASCADE,
+ UNIQUE(bot_id,update_id)
+);
+CREATE INDEX telegram_outbox_pending_idx ON telegram_outbox(bot_id,next_attempt_at) WHERE status='pending';
+CREATE TABLE telegram_polling_state (bot_id bigint PRIMARY KEY, next_offset bigint NOT NULL DEFAULT 0);
+`;
+export const migrations = [
+ {version: '001_initial', sql, checksum: createHash('sha256').update(sql).digest('hex')},
+ {version: '002_telegram', sql: telegramSql, checksum: createHash('sha256').update(telegramSql).digest('hex')}
+];

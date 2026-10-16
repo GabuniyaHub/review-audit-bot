@@ -67,11 +67,12 @@ export class PollingService implements OnApplicationBootstrap, BeforeApplication
   }
   async flushOutbox():Promise<void> {
     if(!this.botId) return;
-    const messages=await this.database.pool.query("SELECT id,chat_id,text,attempts,next_attempt_at FROM telegram_outbox WHERE bot_id=$1 AND status='pending' ORDER BY id LIMIT 20",[this.botId]);
+    const messages=await this.database.pool.query("SELECT id,chat_id,text,attempts,next_attempt_at,document_text,document_filename FROM telegram_outbox WHERE bot_id=$1 AND status='pending' ORDER BY id LIMIT 20",[this.botId]);
     for(const row of messages.rows) {
       if(this.abort.signal.aborted || new Date(row.next_attempt_at).getTime()>Date.now()) break;
       try {
-        await this.api.call('sendMessage',{chat_id:row.chat_id,text:row.text,link_preview_options:{is_disabled:true}},this.abort.signal);
+        if(row.document_text!==null)await this.api.call('sendDocument',{chat_id:row.chat_id,caption:row.text.slice(0,1024),document:row.document_text,filename:row.document_filename},this.abort.signal);
+        else await this.api.call('sendMessage',{chat_id:row.chat_id,text:row.text,link_preview_options:{is_disabled:true}},this.abort.signal);
         await this.database.pool.query("UPDATE telegram_outbox SET status='sent',sent_at=now(),attempts=attempts+1 WHERE id=$1",[row.id]);
       } catch(error) {
         if(this.abort.signal.aborted) break;

@@ -169,9 +169,17 @@ ALTER TABLE telegram_outbox ADD COLUMN audit_run_id bigint REFERENCES audit_runs
 CREATE UNIQUE INDEX one_analysis_notification ON telegram_outbox(bot_id,audit_run_id) WHERE audit_run_id IS NOT NULL;
 CREATE INDEX analysis_queue_idx ON audit_runs(next_attempt_at) WHERE status='pending' AND stage='analysis';
 `;
+const reportSql = `
+ALTER TABLE reports ADD COLUMN input_hash text CHECK(input_hash ~ '^[0-9a-f]{64}$');
+CREATE UNIQUE INDEX report_snapshot_unique ON reports(project_id,input_hash) WHERE input_hash IS NOT NULL;
+ALTER TABLE telegram_outbox ADD COLUMN document_text text;
+ALTER TABLE telegram_outbox ADD COLUMN document_filename text;
+ALTER TABLE telegram_outbox ADD CONSTRAINT document_pair CHECK((document_text IS NULL)=(document_filename IS NULL));
+`;
 export const migrations = [
  {version: '001_initial', sql, checksum: createHash('sha256').update(sql).digest('hex')},
  {version: '002_telegram', sql: telegramSql, checksum: createHash('sha256').update(telegramSql).digest('hex')},
  {version: '003_collection', sql: collectionSql, checksum: createHash('sha256').update(collectionSql).digest('hex')},
- {version: '004_analysis', sql: analysisSql, checksum: createHash('sha256').update(analysisSql).digest('hex')}
+ {version: '004_analysis', sql: analysisSql, checksum: createHash('sha256').update(analysisSql).digest('hex')},
+ {version: '005_reports', sql: reportSql, checksum: createHash('sha256').update(reportSql).digest('hex')}
 ];

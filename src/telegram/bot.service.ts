@@ -1,3 +1,5 @@
+import { createReport } from '../report/report.service.js';
+import { parsePeriod } from '../report/report.js';
 import { PROMPT_VERSION, SCHEMA_VERSION } from '../analysis/contract.js';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { PoolClient } from 'pg';
@@ -5,7 +7,7 @@ import { Settings, SETTINGS } from '../config/settings.js';
 import { DatabaseService } from '../database/database.service.js';
 import { advance, prompt, Step } from './dialog.js';
 import { SetupDraft, TelegramUpdate } from './types.js';
-const HELP='/analyze — анализ собранных отзывов\n/sources — проверить карточки\n/confirm ID — подтвердить филиал\n/collect — собрать отзывы\n/setup — настроить компанию и до трёх конкурентов\n/settings — посмотреть сохранённые настройки\n/status — состояние аудита\n/report — последний отчёт\n/resume — продолжить настройку\n/cancel — отменить черновик\n/help — справка';
+const HELP='/analyze — анализ собранных отзывов\n/sources — проверить карточки\n/confirm ID — подтвердить филиал\n/collect — собрать отзывы\n/setup — настроить компанию и до трёх конкурентов\n/settings — посмотреть сохранённые настройки\n/status — состояние аудита\n/report — сформировать отчёт и получить файл\n/resume — продолжить настройку\n/cancel — отменить черновик\n/help — справка';
 @Injectable()
 export class BotService {
   constructor(@Inject(DatabaseService) private readonly database: DatabaseService, @Optional() @Inject(SETTINGS) private readonly settings?:Settings) {}
@@ -22,13 +24,13 @@ export class BotService {
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',['telegram-user:'+message.from!.id]);
         const user=(await client.query('INSERT INTO users(telegram_user_id) VALUES($1) ON CONFLICT(telegram_user_id) DO UPDATE SET telegram_user_id=EXCLUDED.telegram_user_id RETURNING id',[message.from!.id])).rows[0].id;
         const reply=await this.respond(client,user,message.text,botId,message.chat.id);
-        await client.query('INSERT INTO telegram_outbox(bot_id,update_id,chat_id,text) VALUES($1,$2,$3,$4)',[botId,update.update_id,message.chat.id,reply]);
+        await client.query('INSERT INTO telegram_outbox(bot_id,update_id,chat_id,text,document_text,document_filename) VALUES($1,$2,$3,$4,$5,$6)',[botId,update.update_id,message.chat.id,typeof reply==='string'?reply:reply.text,typeof reply==='string'?null:reply.document,typeof reply==='string'?null:reply.filename]);
       }
       await client.query('COMMIT');
     } catch(error) {await client.query('ROLLBACK');throw error;}
     finally {client.release();}
   }
-  private async respond(db:PoolClient,user:string,raw:string|undefined,botId:number,chatId:number):Promise<string> {
+  private async respond(db:PoolClient,user:string,raw:string|undefined,botId:number,chatId:number):Promise<string|{text:string;document:string;filename:string}> {
     if(typeof raw!=='string') return 'Пока поддерживаются текстовые сообщения. /help — команды.';
     const text=raw.trim();
     if(text.length>4096) return 'Слишком длинное сообщение. Отправьте короткий ответ.';
@@ -83,14 +85,17 @@ export class BotService {
       for(const r of pending)await db.query('INSERT INTO analysis_run_items(audit_run_id,project_id,review_id,content_hash) VALUES($1,$2,$3,$4)',[run.id,profile.id,r.id,r.content_hash]);
       return `Анализ поставлен в очередь: ${pending.length} отзывов (лимит одного запуска — 1000). Контактные данные и слова с заглавной буквы маскируются перед отправкой в LLM. /status — состояние.`;
     }
-    if(text==='/status'||text==='/report') {
+    if(text==='/report'||text.startsWith('/report ')) {
+      if(!profile)return 'Сначала настройте свою компанию: /setup.';
+      let period;try{period=parsePeriod(text);}catch(e){return (e as Error).message;}
+      const result=await createReport(db,profile.id,this.settings??({llmModel:'nvidia/nemotron-3-super-120b-a12b:free'} as Settings),period);
+      if(!result.report)return result.message!;
+      const report=result.report;
+      return {text:`${result.cached?'Сохранённый отчёт':'Новый отчёт'} от ${new Date(report.created_at).toISOString()}:\n${report.summary}`.slice(0,1000),document:report.markdown,filename:`audit-${report.id}.md`};
+    }
+    if(text==='/status') {
       if(!profile) return 'Сначала настройте свою компанию: /setup.';
       const audit=(await db.query('SELECT id,status,stage,created_at,analyzed_count,error_code FROM audit_runs WHERE project_id=$1 ORDER BY id DESC LIMIT 1',[profile.id])).rows[0];
-      if(text==='/report') {
-        const report=(await db.query('SELECT r.summary,r.created_at FROM reports r JOIN audit_projects p ON p.id=r.project_id WHERE r.project_id=$1 AND p.user_id=$2 ORDER BY r.id DESC LIMIT 1',[profile.id,user])).rows[0];
-        if(report) return `Отчёт от ${new Date(report.created_at).toISOString()}:\n${String(report.summary).slice(0,3400)}`;
-        return 'Отчёта пока нет. Настройки сохранены; /collect — сбор, /analyze — анализ. Полный отчёт будет подключён отдельно. Пустой аудит не создаётся.';
-      }
       const collected=(await db.query(`SELECT sc.source,o.name,cr.status,cr.collected_count,cr.error_code,cr.stop_reason FROM source_cards sc JOIN organizations o ON o.id=sc.organization_id LEFT JOIN LATERAL(SELECT * FROM collection_runs r WHERE r.source_card_id=sc.id ORDER BY id DESC LIMIT 1)cr ON true WHERE sc.project_id=$1 ORDER BY sc.id`,[profile.id])).rows;
       const collectionStatuses:Record<string,string>={pending:'ожидает',running:'собирается',completed:'обработаны доступные страницы',partial:'частичная выборка',failed:'ошибка'};
       const summary=collected.map(c=>`${c.name}, ${c.source}: ${c.status?collectionStatuses[c.status]:'ещё не собирались'}; ${c.collected_count??0} отзывов${c.stop_reason==='limit'?' (лимит выборки)':''}${c.error_code?' (источник сообщил ошибку)':''}`).join('\n');

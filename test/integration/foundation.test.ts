@@ -49,7 +49,7 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       assert.equal((await fetch(base+'/health/ready')).status,503);
     });
     await t.test('migration is applied once, concurrent repetitions are idempotent',async()=>{
-      assert.deepEqual(await migrate(pool),['001_initial','002_telegram','003_collection','004_analysis']);
+      assert.deepEqual(await migrate(pool),['001_initial','002_telegram','003_collection','004_analysis','005_reports']);
       assert.deepEqual(await Promise.all([migrate(pool),migrate(pool)]),[[],[]]);
       assert.equal((await fetch(base+'/health/ready')).status,200);
     });
@@ -96,12 +96,13 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       assert.equal(await send(20001,'/settings','group'),undefined);
       await send(20001,'/setup');await send(20001,'Replacement');await send(20001,'/cancel');
       assert.match((await send(20001,'/settings'))!,/Garden/);
-      assert.match((await send(20001,'/report'))!,/Полный отчёт будет подключён/);
+      assert.match((await send(20001,'/report'))!,/нет сохранённых отзывов/);
       assert.equal((await pool.query('SELECT count(*)::int AS n FROM audit_runs a JOIN audit_projects p ON a.project_id=p.id JOIN users u ON p.user_id=u.id WHERE u.telegram_user_id=20001')).rows[0].n,0);
       const project=(await pool.query('SELECT tp.project_id FROM telegram_profiles tp JOIN users u ON tp.user_id=u.id WHERE u.telegram_user_id=20001')).rows[0].project_id;
       const run=(await pool.query("INSERT INTO audit_runs(project_id,status) VALUES($1,'completed') RETURNING id",[project])).rows[0].id;
       await pool.query("INSERT INTO reports(project_id,audit_run_id,summary,markdown,metrics) VALUES($1,$2,'Private summary','Details','{}')",[project,run]);
-      assert.match((await send(20001,'/report'))!,/Private summary/);
+      // A legacy report without a matching snapshot must not masquerade as current data.
+      assert.match((await send(20001,'/report'))!,/нет сохранённых отзывов/);
       assert.doesNotMatch((await send(20002,'/report'))!,/Private summary/);
       assert.match((await send(20001,'/status'))!,/завершён/);
       await send(20003,'/setup');
@@ -212,6 +213,17 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       // Failed/partial snapshots do not prevent a new explicit run; recover a crashed lease.
       await command();await pool.query("UPDATE audit_runs SET status='running',attempts=1,lease_until=now()-interval '1 minute' WHERE project_id=$1 AND status='pending'",[project]);await service.processNext();assert.equal(calls,3);
       const sent=(await pool.query('SELECT count(*) FROM telegram_outbox WHERE audit_run_id IN(SELECT id FROM audit_runs WHERE project_id=$1)',[project])).rows[0].count;assert.equal(sent,'5');
+    });
+    await t.test('reports are atomic, cached by snapshot, owner-scoped and invalidate stale analyses',async()=>{
+      const config={...settings,analysisEnabled:true};const bot=new BotService(app!.get(DatabaseService),config);let update=12000;
+      const cmd=async(user:number,text:string)=>{const id=update++;await bot.processUpdate(992,{update_id:id,message:{message_id:id,chat:{id:user,type:'private'},from:{id:user},text}});return (await pool.query('SELECT text,document_text,document_filename FROM telegram_outbox WHERE bot_id=992 AND update_id=$1',[id])).rows[0];};
+      const first=await cmd(909091,'/report');assert.ok(first.document_text.includes('# Репутационный аудит'));assert.match(first.document_filename,/^audit-\d+\.md$/);
+      const project=(await pool.query('SELECT project_id FROM telegram_profiles WHERE user_id=(SELECT id FROM users WHERE telegram_user_id=909091)')).rows[0].project_id;
+      const count=async()=>Number((await pool.query('SELECT count(*) FROM reports WHERE project_id=$1',[project])).rows[0].count);
+      assert.equal(await count(),1);const second=await cmd(909091,'/report');assert.equal(first.document_text,second.document_text);assert.equal(await count(),1);assert.match(second.text,/Сохранённый/);
+      const outsider=await cmd(909099,'/report');assert.equal(outsider.document_text,null);assert.match(outsider.text,/настройте/);
+      const noDates=await cmd(909091,'/report 2026-10-01 2026-10-16');assert.equal(noDates.document_text,null);assert.equal(await count(),1);
+      await pool.query("UPDATE reviews SET text='изменённый отзыв',content_hash=$2 WHERE project_id=$1",[project,'e'.repeat(64)]);const stale=await cmd(909091,'/report');assert.equal(stale.document_text,null);assert.match(stale.text,/актуальных проверенных анализов/);assert.equal(await count(),1);
     });
     await t.test('production entry point starts and shuts down cleanly',async()=>{
       const httpPort=await freePort();

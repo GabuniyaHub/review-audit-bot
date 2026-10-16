@@ -116,7 +116,37 @@ CREATE TABLE telegram_outbox (
 CREATE INDEX telegram_outbox_pending_idx ON telegram_outbox(bot_id,next_attempt_at) WHERE status='pending';
 CREATE TABLE telegram_polling_state (bot_id bigint PRIMARY KEY, next_offset bigint NOT NULL DEFAULT 0);
 `;
+const collectionSql = `
+ALTER TABLE collection_runs DROP CONSTRAINT collection_runs_error_code_check;
+ALTER TABLE collection_runs ADD CONSTRAINT collection_runs_error_code_check CHECK(error_code IN ('captcha','rate_limited','forbidden','timeout','layout_changed','unavailable','invalid_data','not_configured'));
+ALTER TABLE collection_runs
+ ADD COLUMN attempts integer NOT NULL DEFAULT 0 CHECK(attempts BETWEEN 0 AND 3),
+ ADD COLUMN next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ ADD COLUMN lease_until timestamptz,
+ ADD COLUMN worker_token uuid,
+ ADD COLUMN pages_fetched integer NOT NULL DEFAULT 0,
+ ADD COLUMN invalid_count integer NOT NULL DEFAULT 0,
+ ADD COLUMN stop_reason text CHECK(stop_reason IN ('exhausted','limit','error')),
+ ADD COLUMN max_reviews integer NOT NULL DEFAULT 150 CHECK(max_reviews BETWEEN 1 AND 1000),
+ ADD COLUMN notify_bot_id bigint,
+ ADD COLUMN notify_chat_id bigint;
+UPDATE collection_runs SET lease_until=now()-interval '1 second' WHERE status='running';
+ALTER TABLE reviews ADD COLUMN text_fingerprint text;
+CREATE INDEX reviews_project_fingerprint_idx ON reviews(project_id,text_fingerprint);
+CREATE TABLE collection_run_items (
+ collection_run_id bigint NOT NULL, project_id bigint NOT NULL, review_id bigint NOT NULL,
+ change_type text NOT NULL CHECK(change_type IN ('inserted','updated','unchanged')),
+ PRIMARY KEY(collection_run_id,review_id),
+ FOREIGN KEY(collection_run_id,project_id) REFERENCES collection_runs(id,project_id) ON DELETE CASCADE,
+ FOREIGN KEY(review_id,project_id) REFERENCES reviews(id,project_id) ON DELETE CASCADE
+);
+ALTER TABLE telegram_outbox ALTER COLUMN update_id DROP NOT NULL;
+ALTER TABLE telegram_outbox ADD COLUMN collection_run_id bigint REFERENCES collection_runs(id) ON DELETE CASCADE;
+CREATE UNIQUE INDEX one_collection_notification ON telegram_outbox(bot_id,collection_run_id) WHERE collection_run_id IS NOT NULL;
+CREATE INDEX collection_queue_idx ON collection_runs(next_attempt_at) WHERE status='pending';
+`;
 export const migrations = [
  {version: '001_initial', sql, checksum: createHash('sha256').update(sql).digest('hex')},
- {version: '002_telegram', sql: telegramSql, checksum: createHash('sha256').update(telegramSql).digest('hex')}
+ {version: '002_telegram', sql: telegramSql, checksum: createHash('sha256').update(telegramSql).digest('hex')},
+ {version: '003_collection', sql: collectionSql, checksum: createHash('sha256').update(collectionSql).digest('hex')}
 ];

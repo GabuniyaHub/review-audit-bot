@@ -4,6 +4,11 @@ import { DatabaseService } from './database/database.service.js';
 import { HealthController } from './health/health.controller.js';
 import { BotService } from './telegram/bot.service.js';
 import { PollingService, telegramApiProvider } from './telegram/polling.service.js';
+import { CollectionService } from './collection/collection.service.js';
+import { CollectionWorker } from './collection/worker.service.js';
+import { SourceCollector } from './collection/collector.js';
+import { REVIEW_COLLECTOR } from './collection/types.js';
 @Module({controllers: [HealthController], providers: [
-  {provide: SETTINGS, useFactory: () => readSettings()}, DatabaseService, BotService, PollingService, telegramApiProvider]})
+  {provide: SETTINGS, useFactory: () => readSettings()}, DatabaseService, BotService, PollingService, telegramApiProvider,
+    {provide:REVIEW_COLLECTOR,inject:[SETTINGS],useFactory:(settings:ReturnType<typeof readSettings>)=>new SourceCollector(settings)},CollectionService,CollectionWorker]})
 export class AppModule {}

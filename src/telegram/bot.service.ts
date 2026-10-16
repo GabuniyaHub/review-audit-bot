@@ -1,12 +1,13 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { PoolClient } from 'pg';
+import { Settings, SETTINGS } from '../config/settings.js';
 import { DatabaseService } from '../database/database.service.js';
 import { advance, prompt, Step } from './dialog.js';
 import { SetupDraft, TelegramUpdate } from './types.js';
-const HELP='/setup — настроить компанию и до трёх конкурентов\n/settings — посмотреть сохранённые настройки\n/status — состояние аудита\n/report — последний отчёт\n/resume — продолжить настройку\n/cancel — отменить черновик\n/help — справка';
+const HELP='/sources — проверить карточки\n/confirm ID — подтвердить филиал\n/collect — собрать отзывы\n/setup — настроить компанию и до трёх конкурентов\n/settings — посмотреть сохранённые настройки\n/status — состояние аудита\n/report — последний отчёт\n/resume — продолжить настройку\n/cancel — отменить черновик\n/help — справка';
 @Injectable()
 export class BotService {
-  constructor(@Inject(DatabaseService) private readonly database: DatabaseService) {}
+  constructor(@Inject(DatabaseService) private readonly database: DatabaseService, @Optional() @Inject(SETTINGS) private readonly settings?:Settings) {}
   async processUpdate(botId: number, update: TelegramUpdate): Promise<void> {
     if(!Number.isSafeInteger(botId)||botId<=0||!Number.isSafeInteger(update.update_id)||update.update_id<0) return;
     const client=await this.database.pool.connect();
@@ -19,14 +20,14 @@ export class BotService {
       if(message?.chat.type==='private' && Number.isSafeInteger(message.from?.id) && message.from!.id>0 && message.chat.id===message.from!.id && !message.from!.is_bot) {
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',['telegram-user:'+message.from!.id]);
         const user=(await client.query('INSERT INTO users(telegram_user_id) VALUES($1) ON CONFLICT(telegram_user_id) DO UPDATE SET telegram_user_id=EXCLUDED.telegram_user_id RETURNING id',[message.from!.id])).rows[0].id;
-        const reply=await this.respond(client,user,message.text);
+        const reply=await this.respond(client,user,message.text,botId,message.chat.id);
         await client.query('INSERT INTO telegram_outbox(bot_id,update_id,chat_id,text) VALUES($1,$2,$3,$4)',[botId,update.update_id,message.chat.id,reply]);
       }
       await client.query('COMMIT');
     } catch(error) {await client.query('ROLLBACK');throw error;}
     finally {client.release();}
   }
-  private async respond(db:PoolClient,user:string,raw?:string):Promise<string> {
+  private async respond(db:PoolClient,user:string,raw:string|undefined,botId:number,chatId:number):Promise<string> {
     if(typeof raw!=='string') return 'Пока поддерживаются текстовые сообщения. /help — команды.';
     const text=raw.trim();
     if(text.length>4096) return 'Слишком длинное сообщение. Отправьте короткий ответ.';
@@ -47,15 +48,43 @@ export class BotService {
       const cards=(await db.query('SELECT organization_id,source,url,match_status FROM source_cards WHERE project_id=$1 ORDER BY id',[profile.id])).rows;
       return organizations.map(o=>`${o.role==='own'?'Своя компания':'Конкурент'}: ${o.name}\n${o.city}, ${o.address}\n${cards.filter(c=>c.organization_id===o.id).map(c=>`${c.source}: ${c.url} (${c.match_status==='verified'?'филиал подтверждён':'филиал не подтверждён'})`).join('\n')}`).join('\n\n')+'\n\nИзменить: /setup. Предыдущая версия сохранится в истории.';
     }
+    if(text==='/sources') {
+      if(!profile)return 'Сначала настройте свою компанию: /setup.';
+      const cards=(await db.query('SELECT sc.id,sc.source,sc.url,sc.match_status,o.name,o.city,o.address FROM source_cards sc JOIN organizations o ON o.id=sc.organization_id WHERE sc.project_id=$1 ORDER BY sc.id',[profile.id])).rows;
+      return cards.map(c=>`ID ${c.id}: ${c.name}, ${c.city}, ${c.address}\n${c.source}: ${c.url}\n${c.match_status==='verified'?'Подтверждено':'Не подтверждено'}`).join('\n\n')+'\n\nОткройте ссылки и проверьте, что это нужные филиалы. /confirm ID — подтвердить конкретную карточку. /collect — собрать отзывы подтверждённых карточек.';
+    }
+    if(text.startsWith('/confirm ')) {
+      if(!profile)return 'Сначала настройте компанию: /setup.';
+      const id=text.slice(9).trim();if(!/^\d{1,18}$/.test(id))return 'Формат: /confirm ID. Список карточек: /sources.';
+      const confirmed=await db.query("UPDATE source_cards SET match_status='verified',verified_at=now() WHERE id=$1 AND project_id=$2 RETURNING id",[id,profile.id]);
+      return confirmed.rowCount?'Карточка подтверждена вами. /collect — начать сбор.':'Карточка не найдена в ваших настройках. /sources — список.';
+    }
+    if(text==='/collect') {
+      if(!profile)return 'Сначала настройте компанию: /setup.';
+      if(!this.settings?.collectionEnabled)return 'Сбор пока отключён. Попробуйте позже.';
+      const cards=(await db.query('SELECT id,match_status,source FROM source_cards WHERE project_id=$1 ORDER BY id',[profile.id])).rows;
+      const verified=cards.filter(c=>c.match_status==='verified');
+      if(!verified.length)return 'Сначала проверьте филиалы: /sources, затем /confirm ID.';
+      let queued=0;let unavailable=0;
+      for(const card of verified) {
+        if(card.source==='2gis'&&!this.settings.twoGisReviewsKey){unavailable++;continue;}
+        const result=await db.query("INSERT INTO collection_runs(project_id,source_card_id,max_reviews,notify_bot_id,notify_chat_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING id",[profile.id,card.id,this.settings.collectionMaxReviews,botId,chatId]);queued+=result.rowCount??0;
+      }
+      return `Заданий на сбор добавлено: ${queued}. ${verified.length-unavailable-queued} уже выполняются или ожидают. ${cards.length-verified.length} карточек не подтверждены.${unavailable?' Часть источников пока не подключена.':''} Лимит: ${this.settings.collectionMaxReviews} отзывов на карточку. /status — проверить. Анализ будет подключён отдельно.`;
+    }
     if(text==='/status'||text==='/report') {
       if(!profile) return 'Сначала настройте свою компанию: /setup.';
       const audit=(await db.query('SELECT id,status,stage,created_at FROM audit_runs WHERE project_id=$1 ORDER BY id DESC LIMIT 1',[profile.id])).rows[0];
       if(text==='/report') {
         const report=(await db.query('SELECT r.summary,r.created_at FROM reports r JOIN audit_projects p ON p.id=r.project_id WHERE r.project_id=$1 AND p.user_id=$2 ORDER BY r.id DESC LIMIT 1',[profile.id,user])).rows[0];
         if(report) return `Отчёт от ${new Date(report.created_at).toISOString()}:\n${String(report.summary).slice(0,3400)}`;
-        return 'Отчёта пока нет. Настройки сохранены; сбор и анализ будут подключены на следующих этапах. Пустой аудит не создаётся.';
+        return 'Отчёта пока нет. Настройки сохранены; анализ будет подключён на следующих этапах; сбор доступен через /collect. Пустой аудит не создаётся.';
       }
-      if(!audit) return 'Настройки сохранены. Аудит ещё не запускался; автоматический сбор пока не подключён.';
+      const collected=(await db.query(`SELECT sc.source,o.name,cr.status,cr.collected_count,cr.error_code,cr.stop_reason FROM source_cards sc JOIN organizations o ON o.id=sc.organization_id LEFT JOIN LATERAL(SELECT * FROM collection_runs r WHERE r.source_card_id=sc.id ORDER BY id DESC LIMIT 1)cr ON true WHERE sc.project_id=$1 ORDER BY sc.id`,[profile.id])).rows;
+      const collectionStatuses:Record<string,string>={pending:'ожидает',running:'собирается',completed:'обработаны доступные страницы',partial:'частичная выборка',failed:'ошибка'};
+      const summary=collected.map(c=>`${c.name}, ${c.source}: ${c.status?collectionStatuses[c.status]:'ещё не собирались'}; ${c.collected_count??0} отзывов${c.stop_reason==='limit'?' (лимит выборки)':''}${c.error_code?' (источник сообщил ошибку)':''}`).join('\n');
+      if(!audit)return summary+'\nАнализ ещё не запускался. /collect — обновить отзывы.';
+
       const statuses:Record<string,string>={pending:'ожидает',running:'выполняется',completed:'завершён',partial:'завершён частично',failed:'ошибка'};
       const stages:Record<string,string>={collection:'сбор отзывов',analysis:'анализ',report:'отчёт'};
       return `Последний аудит: ${statuses[audit.status]??'неизвестно'}. Этап: ${stages[audit.stage]??'неизвестно'}. Дата: ${new Date(audit.created_at).toISOString()}.`;

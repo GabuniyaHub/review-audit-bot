@@ -1,0 +1,39 @@
+{
+  "checked_at": "2026-10-16T09:44:49.753Z",
+  "results": [
+    {
+      "name": "Garden",
+      "source": "yandex",
+      "status": "partial",
+      "error_code": null,
+      "collected_count": 125,
+      "pages_fetched": 3,
+      "stop_reason": "limit"
+    },
+    {
+      "name": "Optimist coffee",
+      "source": "yandex",
+      "status": "completed",
+      "error_code": null,
+      "collected_count": 115,
+      "pages_fetched": 3,
+      "stop_reason": "exhausted"
+    }
+  ],
+  "counts": [
+    {
+      "source": "yandex",
+      "reviews": 240,
+      "with_text": 240
+    }
+  ],
+  "repeat": {
+    "status": "partial",
+    "error_code": null,
+    "collected_count": 125,
+    "total_before": 240,
+    "total_after": 240
+  },
+  "notes": "Real external responses, isolated PostgreSQL. No review texts, authors, keys or DB credentials exported.",
+  "provenance": "live-http"
+}

@@ -1,0 +1,57 @@
+{
+  "provenance": "recorded-2gis-responses-no-network",
+  "checked_at": "2026-10-16T09:45:30.985Z",
+  "results": [
+    {
+      "name": "Garden",
+      "source": "2gis",
+      "status": "completed",
+      "error_code": null,
+      "collected_count": 125,
+      "pages_fetched": 3,
+      "stop_reason": "exhausted"
+    },
+    {
+      "name": "Кофе Брют",
+      "source": "2gis",
+      "status": "completed",
+      "error_code": null,
+      "collected_count": 125,
+      "pages_fetched": 3,
+      "stop_reason": "exhausted"
+    },
+    {
+      "name": "Optimist coffee",
+      "source": "2gis",
+      "status": "completed",
+      "error_code": null,
+      "collected_count": 125,
+      "pages_fetched": 3,
+      "stop_reason": "exhausted"
+    },
+    {
+      "name": "Максим",
+      "source": "2gis",
+      "status": "completed",
+      "error_code": null,
+      "collected_count": 125,
+      "pages_fetched": 3,
+      "stop_reason": "exhausted"
+    }
+  ],
+  "counts": [
+    {
+      "source": "2gis",
+      "reviews": 500,
+      "with_text": 500
+    }
+  ],
+  "repeat": {
+    "status": "completed",
+    "error_code": null,
+    "collected_count": 125,
+    "total_before": 500,
+    "total_after": 500
+  },
+  "notes": "Previously captured source responses through injected HTTP transport, isolated PostgreSQL; no external requests. No texts or secrets exported."
+}

@@ -17,6 +17,9 @@ import { migrate } from '../../src/database/migrate.js';
 import { migrations } from '../../src/database/migrations.js';
 import { DatabaseService } from '../../src/database/database.service.js';
 import { HealthController } from '../../src/health/health.controller.js';
+import { CollectionService } from '../../src/collection/collection.service.js';
+import { CollectionError, ReviewCollector, SourceTarget } from '../../src/collection/types.js';
+import { normalizeReview } from '../../src/collection/normalize.js';
 import { BotService } from '../../src/telegram/bot.service.js';
 import { PollingService } from '../../src/telegram/polling.service.js';
 import { TelegramApi, TelegramApiError } from '../../src/telegram/api.js';
@@ -44,7 +47,7 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       assert.equal((await fetch(base+'/health/ready')).status,503);
     });
     await t.test('migration is applied once, concurrent repetitions are idempotent',async()=>{
-      assert.deepEqual(await migrate(pool),['001_initial','002_telegram']);
+      assert.deepEqual(await migrate(pool),['001_initial','002_telegram','003_collection']);
       assert.deepEqual(await Promise.all([migrate(pool),migrate(pool)]),[[],[]]);
       assert.equal((await fetch(base+'/health/ready')).status,200);
     });
@@ -91,7 +94,7 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       assert.equal(await send(20001,'/settings','group'),undefined);
       await send(20001,'/setup');await send(20001,'Replacement');await send(20001,'/cancel');
       assert.match((await send(20001,'/settings'))!,/Garden/);
-      assert.match((await send(20001,'/report'))!,/будут подключены/);
+      assert.match((await send(20001,'/report'))!,/анализ будет подключён/);
       assert.equal((await pool.query('SELECT count(*)::int AS n FROM audit_runs a JOIN audit_projects p ON a.project_id=p.id JOIN users u ON p.user_id=u.id WHERE u.telegram_user_id=20001')).rows[0].n,0);
       const project=(await pool.query('SELECT tp.project_id FROM telegram_profiles tp JOIN users u ON tp.user_id=u.id WHERE u.telegram_user_id=20001')).rows[0].project_id;
       const run=(await pool.query("INSERT INTO audit_runs(project_id,status) VALUES($1,'completed') RETURNING id",[project])).rows[0].id;
@@ -139,9 +142,51 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       const webhookApi:TelegramApi={async call<T>(method:string):Promise<T>{return (method==='getMe'?{id:901,is_bot:true}:{url:'https://example.test/webhook'}) as T;}};
       await assert.rejects(new PollingService(config,database,bot,webhookApi).onApplicationBootstrap(),/webhook/);
     });
+    await t.test('collection confirms ownership, upserts edits, preserves partial data and recovers leases',async()=>{
+      const database=app!.get(DatabaseService);const config={...settings,collectionEnabled:true,twoGisReviewsKey:'test-key',collectionMaxReviews:50};
+      const bot=new BotService(database,config);let update=7000;
+      const send=async(user:number,text:string)=>{const id=++update;await bot.processUpdate(1000,{update_id:id,message:{message_id:id,from:{id:user},chat:{id:user,type:'private'},text}});return (await pool.query('SELECT text FROM telegram_outbox WHERE bot_id=1000 AND update_id=$1',[id])).rows[0].text as string;};
+      for(const text of ['/setup','Collection pilot','Tyumen','Street 1','https://2gis.ru/firm/100/','https://yandex.ru/maps/org/200/','/done','/save'])await send(30001,text);
+      assert.match(await send(30001,'/collect'),/Сначала проверьте/);
+      const profile=(await pool.query('SELECT tp.project_id FROM telegram_profiles tp JOIN users u ON u.id=tp.user_id WHERE u.telegram_user_id=30001')).rows[0].project_id;
+      const cards=(await pool.query('SELECT id FROM source_cards WHERE project_id=$1 ORDER BY id',[profile])).rows;
+      assert.match(await send(30002,`/confirm ${cards[0].id}`),/Сначала настройте/);
+      for(const card of cards)await send(30001,`/confirm ${card.id}`);
+      assert.match(await send(30001,'/collect'),/добавлено: 2/);assert.match(await send(30001,'/collect'),/добавлено: 0/);
+      let mode='normal';let calls=0;
+      const collector:ReviewCollector={async *pages(target:SourceTarget){
+        calls++;if(mode==='temporary')throw new CollectionError('timeout');
+        const reviews=[normalizeReview({externalId:'r1',text:mode==='edit'?'Edited':'Same text',rating:5},target.source),normalizeReview({externalId:'r2',text:'Second',rating:4},target.source)];
+        yield {reviews,invalidCount:0,page:1,stopReason:mode==='captcha'?null:'exhausted'};
+        if(mode==='captcha')throw new CollectionError('captcha');
+      }};
+      const service=new CollectionService(database,config,collector);
+      assert.deepEqual(await Promise.all([service.processNext(),service.processNext()]),[true,true]);assert.equal(calls,2);
+      assert.equal((await pool.query('SELECT count(*)::int AS n FROM reviews WHERE project_id=$1',[profile])).rows[0].n,4);
+      assert.equal((await pool.query("SELECT count(DISTINCT source_card_id)::int AS n FROM reviews WHERE project_id=$1 AND text='Same text'",[profile])).rows[0].n,2);
+      await send(30001,'/collect');await service.processNext();await service.processNext();
+      assert.equal((await pool.query('SELECT count(*)::int AS n FROM reviews WHERE project_id=$1',[profile])).rows[0].n,4);
+      mode='edit';await send(30001,'/collect');await service.processNext();await service.processNext();
+      assert.equal((await pool.query("SELECT count(*)::int AS n FROM collection_run_items i JOIN collection_runs r ON r.id=i.collection_run_id WHERE r.project_id=$1 AND i.change_type='updated'",[profile])).rows[0].n,2);
+      assert.equal((await pool.query("SELECT count(*)::int AS n FROM reviews WHERE project_id=$1 AND text='Edited'",[profile])).rows[0].n,2);
+      mode='captcha';
+      const enqueue=async()=> (await pool.query('INSERT INTO collection_runs(project_id,source_card_id,notify_bot_id,notify_chat_id) VALUES($1,$2,1000,30001) RETURNING id',[profile,cards[0].id])).rows[0].id;
+      const partial=await enqueue();await service.processNext();
+      const partialRun=(await pool.query('SELECT * FROM collection_runs WHERE id=$1',[partial])).rows[0];
+      assert.equal(partialRun.status,'partial');assert.equal(partialRun.error_code,'captcha');assert.equal(partialRun.collected_count,2);
+      assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_outbox WHERE collection_run_id=$1',[partial])).rows[0].n,1);
+      mode='temporary';const retried=await enqueue();
+      for(let i=0;i<3;i++){await service.processNext();await pool.query('UPDATE collection_runs SET next_attempt_at=now() WHERE id=$1',[retried]);}
+      const terminal=(await pool.query('SELECT status,attempts FROM collection_runs WHERE id=$1',[retried])).rows[0];assert.equal(terminal.status,'failed');assert.equal(terminal.attempts,3);
+      mode='normal';const recovered=await enqueue();await pool.query("UPDATE collection_runs SET status='running',attempts=1,lease_until=now()-interval '1 minute',worker_token='00000000-0000-4000-8000-000000000001' WHERE id=$1",[recovered]);
+      await service.processNext();assert.equal((await pool.query('SELECT status FROM collection_runs WHERE id=$1',[recovered])).rows[0].status,'completed');
+      const abandoned=await enqueue();await pool.query("UPDATE collection_runs SET status='running',attempts=3,lease_until=now()-interval '1 minute' WHERE id=$1",[abandoned]);
+      await service.processNext();assert.equal((await pool.query('SELECT status FROM collection_runs WHERE id=$1',[abandoned])).rows[0].status,'failed');
+      assert.match(await send(30001,'/status'),/ошибка/);
+    });
     await t.test('production entry point starts and shuts down cleanly',async()=>{
       const httpPort=await freePort();
-      const child=spawn(process.execPath,['dist/src/main.js'],{env:{...process.env,NODE_ENV:'test',TELEGRAM_ENABLED:'false',DATABASE_URL:settings.databaseUrl,HOST:'127.0.0.1',PORT:String(httpPort),DB_SSL:'false'},stdio:'ignore'});
+      const child=spawn(process.execPath,['dist/src/main.js'],{env:{...process.env,NODE_ENV:'test',TELEGRAM_ENABLED:'false',COLLECTION_ENABLED:'false',DATABASE_URL:settings.databaseUrl,HOST:'127.0.0.1',PORT:String(httpPort),DB_SSL:'false'},stdio:'ignore'});
       const exit=once(child,'exit');
       try {
         let ready=false;

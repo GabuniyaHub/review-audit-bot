@@ -1,0 +1,102 @@
+[
+  {
+    "name": "Garden",
+    "source_id": "70000001031280266",
+    "target": 125,
+    "pages": [
+      {
+        "offset": 0,
+        "received": 50
+      },
+      {
+        "offset": 50,
+        "received": 50
+      },
+      {
+        "offset": 100,
+        "received": 50
+      }
+    ],
+    "unique_text_reviews_available": 150,
+    "selected": 125,
+    "with_rating": 125,
+    "with_date": 125,
+    "with_url": 3,
+    "elapsed_seconds": 5.15
+  },
+  {
+    "name": "Кофе Брют",
+    "source_id": "70000001054792107",
+    "target": 125,
+    "pages": [
+      {
+        "offset": 0,
+        "received": 50
+      },
+      {
+        "offset": 50,
+        "received": 50
+      },
+      {
+        "offset": 100,
+        "received": 50
+      }
+    ],
+    "unique_text_reviews_available": 150,
+    "selected": 125,
+    "with_rating": 125,
+    "with_date": 125,
+    "with_url": 1,
+    "elapsed_seconds": 5.84
+  },
+  {
+    "name": "Optimist coffee",
+    "source_id": "70000001076287128",
+    "target": 125,
+    "pages": [
+      {
+        "offset": 0,
+        "received": 50
+      },
+      {
+        "offset": 50,
+        "received": 50
+      },
+      {
+        "offset": 100,
+        "received": 50
+      }
+    ],
+    "unique_text_reviews_available": 150,
+    "selected": 125,
+    "with_rating": 125,
+    "with_date": 125,
+    "with_url": 3,
+    "elapsed_seconds": 5.07
+  },
+  {
+    "name": "Максим",
+    "source_id": "1830115629686843",
+    "target": 125,
+    "pages": [
+      {
+        "offset": 0,
+        "received": 50
+      },
+      {
+        "offset": 50,
+        "received": 50
+      },
+      {
+        "offset": 100,
+        "received": 50
+      }
+    ],
+    "unique_text_reviews_available": 150,
+    "selected": 125,
+    "with_rating": 125,
+    "with_date": 125,
+    "with_url": 1,
+    "elapsed_seconds": 5.24
+  }
+]

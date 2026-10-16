@@ -1,0 +1,150 @@
+[
+  {
+    "name": "Garden",
+    "org_id": "35702680521",
+    "expected_address_fragment": "Малыгина",
+    "pages": [
+      {
+        "page": 1,
+        "http_status": 200,
+        "status": "ok",
+        "received": 50,
+        "unique_text_ids": 50,
+        "new_ids": 50,
+        "with_rating": 50,
+        "with_updated_time": 50
+      },
+      {
+        "page": 2,
+        "http_status": 200,
+        "status": "ok",
+        "received": 50,
+        "unique_text_ids": 50,
+        "new_ids": 50,
+        "with_rating": 50,
+        "with_updated_time": 50
+      },
+      {
+        "page": 3,
+        "http_status": 200,
+        "status": "ok",
+        "received": 50,
+        "unique_text_ids": 50,
+        "new_ids": 50,
+        "with_rating": 50,
+        "with_updated_time": 50
+      }
+    ],
+    "actual_title": "Garden Coffee",
+    "actual_address": "ул. Малыгина, 90, Тюмень",
+    "address_fragment_matches": true,
+    "unique_text_reviews": 150,
+    "elapsed_seconds": 5.49
+  },
+  {
+    "name": "Кофе Брют",
+    "org_id": "130058052929",
+    "expected_address_fragment": "Советская",
+    "pages": [
+      {
+        "page": 1,
+        "http_status": 200,
+        "status": "ok",
+        "received": 50,
+        "unique_text_ids": 50,
+        "new_ids": 50,
+        "with_rating": 50,
+        "with_updated_time": 50
+      },
+      {
+        "page": 2,
+        "http_status": 200,
+        "status": "ok",
+        "received": 50,
+        "unique_text_ids": 50,
+        "new_ids": 50,
+        "with_rating": 50,
+        "with_updated_time": 50
+      },
+      {
+        "page": 3,
+        "http_status": 200,
+        "status": "ok",
+        "received": 50,
+        "unique_text_ids": 50,
+        "new_ids": 50,
+        "with_rating": 50,
+        "with_updated_time": 50
+      }
+    ],
+    "actual_title": "Кофе Брют",
+    "actual_address": "Советская ул., 55, Тюмень",
+    "address_fragment_matches": true,
+    "unique_text_reviews": 150,
+    "elapsed_seconds": 5.71
+  },
+  {
+    "name": "Optimist coffee",
+    "org_id": "130207180834",
+    "expected_address_fragment": "Республики, 58",
+    "pages": [
+      {
+        "page": 1,
+        "http_status": 200,
+        "status": "ok",
+        "received": 50,
+        "unique_text_ids": 50,
+        "new_ids": 50,
+        "with_rating": 50,
+        "with_updated_time": 50
+      },
+      {
+        "page": 2,
+        "http_status": 200,
+        "status": "ok",
+        "received": 50,
+        "unique_text_ids": 50,
+        "new_ids": 50,
+        "with_rating": 50,
+        "with_updated_time": 50
+      },
+      {
+        "page": 3,
+        "http_status": 200,
+        "status": "ok",
+        "received": 15,
+        "unique_text_ids": 15,
+        "new_ids": 15,
+        "with_rating": 15,
+        "with_updated_time": 15
+      }
+    ],
+    "actual_title": "Optimist Coffee",
+    "actual_address": "ул. Республики, 58, Тюмень",
+    "address_fragment_matches": true,
+    "unique_text_reviews": 115,
+    "elapsed_seconds": 6.24
+  },
+  {
+    "name": "Максим (кандидат)",
+    "org_id": "1085996169",
+    "expected_address_fragment": "Республики, 24",
+    "pages": [
+      {
+        "page": 1,
+        "http_status": 200,
+        "status": "ok",
+        "received": 50,
+        "unique_text_ids": 50,
+        "new_ids": 50,
+        "with_rating": 50,
+        "with_updated_time": 50
+      }
+    ],
+    "actual_title": "Максим",
+    "actual_address": "ул. Семакова, 19, Тюмень",
+    "address_fragment_matches": false,
+    "unique_text_reviews": 50,
+    "elapsed_seconds": 0.84
+  }
+]

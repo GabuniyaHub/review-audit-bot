@@ -176,10 +176,48 @@ ALTER TABLE telegram_outbox ADD COLUMN document_text text;
 ALTER TABLE telegram_outbox ADD COLUMN document_filename text;
 ALTER TABLE telegram_outbox ADD CONSTRAINT document_pair CHECK((document_text IS NULL)=(document_filename IS NULL));
 `;
+const schedulerSql = `
+CREATE TABLE project_schedules (
+ project_id bigint PRIMARY KEY REFERENCES audit_projects(id) ON DELETE CASCADE,
+ enabled boolean NOT NULL DEFAULT true,
+ daily_time text NOT NULL CHECK(daily_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'),
+ time_zone text NOT NULL, next_run_at timestamptz NOT NULL,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ bot_id bigint NOT NULL, chat_id bigint NOT NULL CHECK(chat_id>0)
+);
+CREATE TABLE scheduled_runs (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ project_id bigint NOT NULL REFERENCES project_schedules(project_id) ON DELETE CASCADE,
+ slot_at timestamptz NOT NULL,
+ status text NOT NULL DEFAULT 'running' CHECK(status IN ('running','completed','partial','failed')),
+ phase text NOT NULL DEFAULT 'collection' CHECK(phase IN ('collection','analysis','report')),
+ analysis_run_id bigint, report_id bigint REFERENCES reports(id) ON DELETE SET NULL,
+ issues jsonb NOT NULL DEFAULT '[]'::jsonb,
+ error_code text, started_at timestamptz NOT NULL DEFAULT now(), finished_at timestamptz,
+ bot_id bigint NOT NULL,chat_id bigint NOT NULL,
+ FOREIGN KEY(analysis_run_id,project_id) REFERENCES audit_runs(id,project_id),
+ UNIQUE(project_id,slot_at),UNIQUE(id,project_id)
+);
+CREATE UNIQUE INDEX one_active_scheduled_project ON scheduled_runs(project_id) WHERE status='running';
+CREATE TABLE scheduled_collections (
+ scheduled_run_id bigint NOT NULL,project_id bigint NOT NULL,collection_run_id bigint NOT NULL UNIQUE,
+ PRIMARY KEY(scheduled_run_id,collection_run_id),
+ FOREIGN KEY(scheduled_run_id,project_id) REFERENCES scheduled_runs(id,project_id) ON DELETE CASCADE,
+ FOREIGN KEY(collection_run_id,project_id) REFERENCES collection_runs(id,project_id) ON DELETE CASCADE
+);
+CREATE TABLE notification_incidents (
+ project_id bigint NOT NULL REFERENCES audit_projects(id) ON DELETE CASCADE,
+ resource text NOT NULL,error_code text,last_seen_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(project_id,resource)
+);
+ALTER TABLE telegram_outbox ADD COLUMN scheduled_run_id bigint REFERENCES scheduled_runs(id) ON DELETE CASCADE;
+CREATE UNIQUE INDEX one_scheduled_notification ON telegram_outbox(bot_id,scheduled_run_id) WHERE scheduled_run_id IS NOT NULL;
+`;
 export const migrations = [
  {version: '001_initial', sql, checksum: createHash('sha256').update(sql).digest('hex')},
  {version: '002_telegram', sql: telegramSql, checksum: createHash('sha256').update(telegramSql).digest('hex')},
  {version: '003_collection', sql: collectionSql, checksum: createHash('sha256').update(collectionSql).digest('hex')},
  {version: '004_analysis', sql: analysisSql, checksum: createHash('sha256').update(analysisSql).digest('hex')},
- {version: '005_reports', sql: reportSql, checksum: createHash('sha256').update(reportSql).digest('hex')}
+ {version: '005_reports', sql: reportSql, checksum: createHash('sha256').update(reportSql).digest('hex')},
+ {version: '006_scheduler', sql: schedulerSql, checksum: createHash('sha256').update(schedulerSql).digest('hex')}
 ];

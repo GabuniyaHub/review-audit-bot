@@ -1,3 +1,4 @@
+import { incident } from '../scheduler/incidents.js';
 import { Inject, Injectable } from '@nestjs/common';
 import { PoolClient } from 'pg';
 import { randomUUID } from 'node:crypto';
@@ -81,6 +82,8 @@ export class CollectionService {
   }
   private async notify(db:PoolClient,run:any):Promise<void> {
     if(!run.notify_bot_id||!run.notify_chat_id)return;
+    const state=await incident(db,run.project_id,'collection:'+run.source_card_id,run.error_code??null);
+    if(run.error_code&&!state.changed)return;
     const card=(await db.query('SELECT sc.source,o.name FROM source_cards sc JOIN organizations o ON sc.organization_id=o.id WHERE sc.id=$1',[run.source_card_id])).rows[0];
     const text=`Сбор отзывов: ${card.name}, ${card.source==='2gis'?'2ГИС':'Яндекс.Карты'}. Сохранено в этом сборе: ${run.collected_count}. ${run.error_code?messages[run.error_code]+'.':run.stop_reason==='limit'?'Достигнут лимит выборки; это не все отзывы площадки.':'Доступные страницы обработаны.'} /status — подробности.`;
     await db.query('INSERT INTO telegram_outbox(bot_id,chat_id,text,collection_run_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[run.notify_bot_id,run.notify_chat_id,text,run.id]);

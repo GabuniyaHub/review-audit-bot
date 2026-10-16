@@ -1,3 +1,4 @@
+import { incident } from '../scheduler/incidents.js';
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { DatabaseService } from '../database/database.service.js';
@@ -42,5 +43,5 @@ export class AnalysisService {
   }return true;
  }
  private async finish(job:any,status:string,error:string|null){const tx=await this.db.pool.connect();try{await tx.query('BEGIN');const r=await tx.query("UPDATE audit_runs SET status=CASE WHEN $3='failed' AND analyzed_count>0 THEN 'partial' ELSE $3 END,error_code=$4,finished_at=now(),worker_token=NULL,lease_until=NULL WHERE id=$1 AND worker_token=$2 AND status='running' RETURNING *",[job.id,job.worker_token,status,error]);if(r.rows[0])await this.notify(tx,r.rows[0]);await tx.query('COMMIT');}catch(e){await tx.query('ROLLBACK');throw e;}finally{tx.release();}}
- private async notify(tx:import('pg').PoolClient,job:any){if(!job.notify_bot_id||!job.notify_chat_id)return;await tx.query('INSERT INTO telegram_outbox(bot_id,chat_id,text,audit_run_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[job.notify_bot_id,job.notify_chat_id,`Анализ отзывов: ${job.status==='completed'?'завершён':job.status==='partial'?'частичный результат':'ошибка'}. Обработано: ${job.analyzed_count}.${job.error_code?' Причина: '+job.error_code+'.':''} /status — состояние. /report — сравнение и файл отчёта.`,job.id]);}
+ private async notify(tx:import('pg').PoolClient,job:any){if(!job.notify_bot_id||!job.notify_chat_id)return;const state=await incident(tx,job.project_id,'analysis',job.error_code??null);if(job.error_code&&!state.changed)return;await tx.query('INSERT INTO telegram_outbox(bot_id,chat_id,text,audit_run_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[job.notify_bot_id,job.notify_chat_id,`Анализ отзывов: ${job.status==='completed'?'завершён':job.status==='partial'?'частичный результат':'ошибка'}. Обработано: ${job.analyzed_count}.${job.error_code?' Причина: '+job.error_code+'.':''} /status — состояние. /report — сравнение и файл отчёта.`,job.id]);}
 }

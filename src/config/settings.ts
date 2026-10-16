@@ -1,5 +1,5 @@
 export interface Settings {
-  analysisEnabled:boolean; llmApiKey:string; llmModel:string; llmTimeoutMs:number; analysisBatchSize:number;
+  schedulerEnabled:boolean; schedulerRunTimeoutMinutes:number; analysisEnabled:boolean; llmApiKey:string; llmModel:string; llmTimeoutMs:number; analysisBatchSize:number;
   nodeEnv: 'development' | 'test' | 'production'; host: string; port: number;
   databaseUrl: string; dbPoolMax: number; dbConnectTimeoutMs: number;
   dbQueryTimeoutMs: number; dbSsl: boolean; telegramEnabled: boolean; telegramBotToken: string; collectionEnabled:boolean; collectionMaxReviews:number; collectionTimeoutMs:number; collectionPageDelayMs:number; twoGisReviewsKey:string; twoGisMode:'api'|'browser';
@@ -39,7 +39,10 @@ export function readSettings(env: NodeJS.ProcessEnv = process.env): Settings {
   const llmModel=env.LLM_MODEL??'nvidia/nemotron-3-super-120b-a12b:free';
   if(!/^[a-zA-Z0-9_.:/-]{1,200}$/.test(llmModel))errors.push('LLM_MODEL');
   if(analysisEnabled==='true'&&!llmApiKey)errors.push('LLM_API_KEY');
-  const settings: Settings = {analysisEnabled:analysisEnabled==='true',llmApiKey,llmModel,llmTimeoutMs:integer('LLM_TIMEOUT_MS',90000,1000,120000),analysisBatchSize:integer('ANALYSIS_BATCH_SIZE',5,1,10),nodeEnv: nodeEnv as Settings['nodeEnv'], host,
+  const schedulerEnabled=env.SCHEDULER_ENABLED??'false';
+  if(!['true','false'].includes(schedulerEnabled))errors.push('SCHEDULER_ENABLED');
+  if(schedulerEnabled==='true'&&(collectionEnabled!=='true'||analysisEnabled!=='true'))errors.push('SCHEDULER_ENABLED requires COLLECTION_ENABLED and ANALYSIS_ENABLED');
+  const settings: Settings = {schedulerEnabled:schedulerEnabled==='true',schedulerRunTimeoutMinutes:integer('SCHEDULER_RUN_TIMEOUT_MINUTES',720,5,1440),analysisEnabled:analysisEnabled==='true',llmApiKey,llmModel,llmTimeoutMs:integer('LLM_TIMEOUT_MS',90000,1000,120000),analysisBatchSize:integer('ANALYSIS_BATCH_SIZE',5,1,10),nodeEnv: nodeEnv as Settings['nodeEnv'], host,
     port: integer('PORT',3000,1,65535), databaseUrl,
     dbPoolMax: integer('DB_POOL_MAX',5,1,50),
     dbConnectTimeoutMs: integer('DB_CONNECT_TIMEOUT_MS',5000,100,60000),

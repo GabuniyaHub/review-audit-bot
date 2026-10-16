@@ -1,13 +1,14 @@
+import { enqueueAnalysis } from '../analysis/enqueue.js';
+import { nextDaily, validZone } from '../scheduler/time.js';
 import { createReport } from '../report/report.service.js';
 import { parsePeriod } from '../report/report.js';
-import { PROMPT_VERSION, SCHEMA_VERSION } from '../analysis/contract.js';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { PoolClient } from 'pg';
 import { Settings, SETTINGS } from '../config/settings.js';
 import { DatabaseService } from '../database/database.service.js';
 import { advance, prompt, Step } from './dialog.js';
 import { SetupDraft, TelegramUpdate } from './types.js';
-const HELP='/analyze — анализ собранных отзывов\n/sources — проверить карточки\n/confirm ID — подтвердить филиал\n/collect — собрать отзывы\n/setup — настроить компанию и до трёх конкурентов\n/settings — посмотреть сохранённые настройки\n/status — состояние аудита\n/report — сформировать отчёт и получить файл\n/resume — продолжить настройку\n/cancel — отменить черновик\n/help — справка';
+const HELP='/schedule — расписание автообновлений\n/analyze — анализ собранных отзывов\n/sources — проверить карточки\n/confirm ID — подтвердить филиал\n/collect — собрать отзывы\n/setup — настроить компанию и до трёх конкурентов\n/settings — посмотреть сохранённые настройки\n/status — состояние аудита\n/report — сформировать отчёт и получить файл\n/resume — продолжить настройку\n/cancel — отменить черновик\n/help — справка';
 @Injectable()
 export class BotService {
   constructor(@Inject(DatabaseService) private readonly database: DatabaseService, @Optional() @Inject(SETTINGS) private readonly settings?:Settings) {}
@@ -45,6 +46,29 @@ export class BotService {
     }
     if(text==='/resume') return session?prompt(session.step,session.payload):'Черновика нет. /setup — настроить компанию.';
     const profile=(await db.query('SELECT p.id FROM audit_projects p JOIN telegram_profiles tp ON tp.project_id=p.id AND tp.user_id=p.user_id WHERE p.user_id=$1',[user])).rows[0];
+    if(profile){
+      await db.query('SELECT pg_advisory_xact_lock(hashtext($1))',['pipeline-project:'+profile.id]);
+      if(text==='/collect'||text==='/analyze'||text==='/report'||text.startsWith('/report ')){
+        const active=await db.query("SELECT 1 FROM scheduled_runs WHERE project_id=$1 AND status='running'",[profile.id]);
+        if(active.rowCount)return 'Автообновление уже выполняется. /status — состояние. Ручной запуск доступен после его завершения.';
+      }
+    }
+    if(text==='/schedule'||text.startsWith('/schedule ')) {
+      if(!profile)return 'Сначала настройте компанию: /setup.';
+      if(text==='/schedule off'){
+        await db.query('UPDATE project_schedules SET enabled=false WHERE project_id=$1',[profile.id]);
+        return 'Следующие автообновления отключены. Уже начатое обновление завершится. /schedule — состояние.';
+      }
+      if(text==='/schedule'){
+        const schedule=(await db.query('SELECT * FROM project_schedules WHERE project_id=$1',[profile.id])).rows[0];
+        return (schedule?`Расписание ${schedule.enabled?'включено':'отключено'}: ежедневно ${schedule.daily_time}, ${schedule.time_zone}. Следующий запуск: ${new Date(schedule.next_run_at).toISOString()}.`:'Расписание не задано.')+`\n/schedule 09:00 Asia/Yekaterinburg — установить время и часовой пояс. /schedule off — отключить.`+(this.settings?.schedulerEnabled?'':'\nФоновый планировщик в этой установке выключен.');
+      }
+      const parts=text.split(/\s+/);if(parts.length!==3||!/^([01]\d|2[0-3]):[0-5]\d$/.test(parts[1])||!validZone(parts[2]))return 'Формат: /schedule 09:00 Asia/Yekaterinburg. Нужны время ЧЧ:ММ и действительный часовой пояс.';
+      if(!this.settings?.schedulerEnabled)return 'Фоновый планировщик выключен. Сначала нужно включить сбор, анализ и планировщик в локальной установке.';
+      const next=nextDaily(new Date(),parts[1],parts[2]);
+      await db.query('INSERT INTO project_schedules(project_id,daily_time,time_zone,next_run_at,next_attempt_at,bot_id,chat_id) VALUES($1,$2,$3,$4,$4,$5,$6) ON CONFLICT(project_id) DO UPDATE SET enabled=true,daily_time=EXCLUDED.daily_time,time_zone=EXCLUDED.time_zone,next_run_at=EXCLUDED.next_run_at,next_attempt_at=EXCLUDED.next_attempt_at,bot_id=EXCLUDED.bot_id,chat_id=EXCLUDED.chat_id',[profile.id,parts[1],parts[2],next,botId,chatId]);
+      return `Ежедневное автообновление включено: ${parts[1]}, ${parts[2]}. Следующий запуск: ${next.toISOString()}. Mac должен быть включён, приложение — запущено. /schedule off — отключить.`;
+    }
     if(text==='/settings') {
       if(!profile) return 'Сохранённых настроек нет. /setup — начать.';
       const organizations=(await db.query('SELECT id,role,name,city,address FROM organizations WHERE project_id=$1 ORDER BY CASE role WHEN \'own\' THEN 0 ELSE 1 END,id',[profile.id])).rows;
@@ -78,12 +102,10 @@ export class BotService {
     if(text==='/analyze') {
       if(!profile)return 'Сначала настройте компанию: /setup.';
       if(!this.settings?.analysisEnabled)return 'Анализ пока отключён. Настройки доступа к LLM проверяются.';
-      const pending=(await db.query(`SELECT r.id,r.content_hash FROM reviews r WHERE r.project_id=$1 AND length(trim(r.text))>0 AND length(r.text)<=12000 AND NOT EXISTS(SELECT 1 FROM review_analyses a WHERE a.review_id=r.id AND a.content_hash=r.content_hash AND a.model=$2 AND a.prompt_version=$3 AND a.schema_version=$4) ORDER BY r.id LIMIT 1000`,[profile.id,this.settings.llmModel,PROMPT_VERSION,SCHEMA_VERSION])).rows;
-      if(!pending.length)return 'Новых текстовых отзывов для анализа нет. Сначала /collect. Пустые тексты и тексты длиннее 12000 символов не отправляются.';
-      const run=(await db.query("INSERT INTO audit_runs(project_id,stage,model,prompt_version,schema_version,notify_bot_id,notify_chat_id) VALUES($1,'analysis',$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING id",[profile.id,this.settings.llmModel,PROMPT_VERSION,SCHEMA_VERSION,botId,chatId])).rows[0];
-      if(!run)return 'Аудит уже ожидает или выполняется. /status — состояние.';
-      for(const r of pending)await db.query('INSERT INTO analysis_run_items(audit_run_id,project_id,review_id,content_hash) VALUES($1,$2,$3,$4)',[run.id,profile.id,r.id,r.content_hash]);
-      return `Анализ поставлен в очередь: ${pending.length} отзывов (лимит одного запуска — 1000). Контактные данные и слова с заглавной буквы маскируются перед отправкой в LLM. /status — состояние.`;
+      const queued=await enqueueAnalysis(db,profile.id,this.settings,botId,chatId);
+      if(!queued.count)return 'Новых текстовых отзывов для анализа нет. Сначала /collect. Пустые тексты и тексты длиннее 12000 символов не отправляются.';
+      if(!queued.id)return 'Аудит уже ожидает или выполняется. /status — состояние.';
+      return `Анализ поставлен в очередь: ${queued.count} отзывов (лимит одного запуска — 1000). Контактные данные и слова с заглавной буквы маскируются перед отправкой в LLM. /status — состояние.`;
     }
     if(text==='/report'||text.startsWith('/report ')) {
       if(!profile)return 'Сначала настройте свою компанию: /setup.';
@@ -95,15 +117,17 @@ export class BotService {
     }
     if(text==='/status') {
       if(!profile) return 'Сначала настройте свою компанию: /setup.';
+      const auto=(await db.query('SELECT status,phase,error_code,started_at FROM scheduled_runs WHERE project_id=$1 ORDER BY id DESC LIMIT 1',[profile.id])).rows[0];
+      const autoStatus=auto?`\nАвтообновление: ${auto.status==='running'?'выполняется':auto.status==='completed'?'завершено':auto.status==='partial'?'частичный результат':'ошибка'}; этап ${auto.phase==='collection'?'сбор':auto.phase==='analysis'?'анализ':'отчёт'}${auto.error_code?' ('+auto.error_code+')':''}.`:'';
       const audit=(await db.query('SELECT id,status,stage,created_at,analyzed_count,error_code FROM audit_runs WHERE project_id=$1 ORDER BY id DESC LIMIT 1',[profile.id])).rows[0];
       const collected=(await db.query(`SELECT sc.source,o.name,cr.status,cr.collected_count,cr.error_code,cr.stop_reason FROM source_cards sc JOIN organizations o ON o.id=sc.organization_id LEFT JOIN LATERAL(SELECT * FROM collection_runs r WHERE r.source_card_id=sc.id ORDER BY id DESC LIMIT 1)cr ON true WHERE sc.project_id=$1 ORDER BY sc.id`,[profile.id])).rows;
       const collectionStatuses:Record<string,string>={pending:'ожидает',running:'собирается',completed:'обработаны доступные страницы',partial:'частичная выборка',failed:'ошибка'};
       const summary=collected.map(c=>`${c.name}, ${c.source}: ${c.status?collectionStatuses[c.status]:'ещё не собирались'}; ${c.collected_count??0} отзывов${c.stop_reason==='limit'?' (лимит выборки)':''}${c.error_code?' (источник сообщил ошибку)':''}`).join('\n');
-      if(!audit)return summary+'\nАнализ ещё не запускался. /collect — обновить отзывы.';
+      if(!audit)return summary+autoStatus+'\nАнализ ещё не запускался. /collect — обновить отзывы.';
 
       const statuses:Record<string,string>={pending:'ожидает',running:'выполняется',completed:'завершён',partial:'завершён частично',failed:'ошибка'};
       const stages:Record<string,string>={collection:'сбор отзывов',analysis:'анализ',report:'отчёт'};
-      return summary+`\nПоследний аудит: ${statuses[audit.status]??'неизвестно'}. Этап: ${stages[audit.stage]??'неизвестно'}. Дата: ${new Date(audit.created_at).toISOString()}. Анализов в запуске: ${audit.analyzed_count??0}.${audit.error_code?' Причина: '+audit.error_code+'.':''}`;
+      return summary+autoStatus+`\nПоследний аудит: ${statuses[audit.status]??'неизвестно'}. Этап: ${stages[audit.stage]??'неизвестно'}. Дата: ${new Date(audit.created_at).toISOString()}. Анализов в запуске: ${audit.analyzed_count??0}.${audit.error_code?' Причина: '+audit.error_code+'.':''}`;
     }
     if(!session) return 'Неизвестная команда. /help — список команд, /setup — настройка.';
     const next=advance(session.step,session.payload,text);
@@ -123,6 +147,7 @@ export class BotService {
       const org=(await db.query('INSERT INTO organizations(project_id,role,name,city,address) VALUES($1,$2,$3,$4,$5) RETURNING id',[project,index===0?'own':'competitor',organization.name,organization.city,organization.address])).rows[0].id;
       for(const card of organization.cards) await db.query('INSERT INTO source_cards(project_id,organization_id,source,external_id,url) VALUES($1,$2,$3,$4,$5)',[project,org,card.source,card.externalId,card.url]);
     }
+    await db.query('UPDATE project_schedules SET enabled=false WHERE project_id IN(SELECT project_id FROM telegram_profiles WHERE user_id=$1)',[user]);
     await db.query('INSERT INTO telegram_profiles(user_id,project_id) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET project_id=EXCLUDED.project_id',[user,project]);
   }
 }

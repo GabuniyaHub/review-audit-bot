@@ -1,3 +1,4 @@
+import { SchedulerService } from '../../src/scheduler/scheduler.service.js';
 import { AnalysisService } from '../../src/analysis/analysis.service.js';
 import { AnalysisError, PROMPT_VERSION, SCHEMA_VERSION } from '../../src/analysis/contract.js';
 import 'reflect-metadata';
@@ -49,7 +50,7 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       assert.equal((await fetch(base+'/health/ready')).status,503);
     });
     await t.test('migration is applied once, concurrent repetitions are idempotent',async()=>{
-      assert.deepEqual(await migrate(pool),['001_initial','002_telegram','003_collection','004_analysis','005_reports']);
+      assert.deepEqual(await migrate(pool),['001_initial','002_telegram','003_collection','004_analysis','005_reports','006_scheduler']);
       assert.deepEqual(await Promise.all([migrate(pool),migrate(pool)]),[[],[]]);
       assert.equal((await fetch(base+'/health/ready')).status,200);
     });
@@ -224,6 +225,52 @@ test('foundation against isolated real PostgreSQL', {timeout:90000}, async t => 
       const outsider=await cmd(909099,'/report');assert.equal(outsider.document_text,null);assert.match(outsider.text,/настройте/);
       const noDates=await cmd(909091,'/report 2026-10-01 2026-10-16');assert.equal(noDates.document_text,null);assert.equal(await count(),1);
       await pool.query("UPDATE reviews SET text='изменённый отзыв',content_hash=$2 WHERE project_id=$1",[project,'e'.repeat(64)]);const stale=await cmd(909091,'/report');assert.equal(stale.document_text,null);assert.match(stale.text,/актуальных проверенных анализов/);assert.equal(await count(),1);
+    });
+    await t.test('daily pipeline survives restart, serializes dispatch, suppresses repeated failures and reports recovery',async()=>{
+      const database=app!.get(DatabaseService);const config={...settings,schedulerEnabled:true,collectionEnabled:true,analysisEnabled:true,llmApiKey:'test'};
+      const uid=(await pool.query('INSERT INTO users(telegram_user_id) VALUES(919191) RETURNING id')).rows[0].id;
+      const project=(await pool.query("INSERT INTO audit_projects(user_id,name) VALUES($1,'Schedule pilot') RETURNING id",[uid])).rows[0].id;
+      await pool.query('INSERT INTO telegram_profiles(user_id,project_id) VALUES($1,$2)',[uid,project]);
+      const org=(await pool.query("INSERT INTO organizations(project_id,role,name,city,address) VALUES($1,'own','Coffee','Tyumen','Street') RETURNING id",[project])).rows[0].id;
+      for(const source of ['yandex','2gis'])await pool.query("INSERT INTO source_cards(project_id,organization_id,source,external_id,url,match_status,verified_at) VALUES($1,$2,$3,'901',$4,'verified',now())",[project,org,source,source==='yandex'?'https://yandex.ru/maps/org/901/reviews/':'https://2gis.ru/firm/901/tab/reviews']);
+      const bot=new BotService(database,config);let update=15000;
+      const cmd=async(user:number,text:string)=>{const id=update++;await bot.processUpdate(993,{update_id:id,message:{message_id:id,chat:{id:user,type:'private'},from:{id:user},text}});return (await pool.query('SELECT text FROM telegram_outbox WHERE bot_id=993 AND update_id=$1',[id])).rows[0].text as string;};
+      assert.match(await cmd(919199,'/schedule 09:00 UTC'),/настройте/);
+      assert.match(await cmd(919191,'/schedule 99:00 UTC'),/Формат/);
+      assert.match(await cmd(919191,'/schedule 09:00 Asia/Yekaterinburg'),/включено/);
+      const now=new Date();let cycle=0;
+      const due=async()=>{cycle++;const slot=new Date(Date.UTC(2026,0,cycle));await pool.query('UPDATE project_schedules SET next_run_at=$2,next_attempt_at=$2 WHERE project_id=$1',[project,slot]);};
+      const tick=()=>new SchedulerService(database,config).tick(now);
+      let mode='normal',calls=0,modelCalls=0;
+      const collector=new CollectionService(database,config,{async *pages(target){calls++;if(mode==='captcha'||mode==='partial'&&target.source==='2gis')throw new CollectionError('captcha');yield {reviews:[normalizeReview({externalId:'review-1',text:'кофе вкусный',rating:5},target.source)],invalidCount:0,page:1,stopReason:'exhausted'};}});
+      const analyzer=new AnalysisService(database,config,{analyze:async(inputs)=>{modelCalls++;return inputs.map(i=>({reviewId:i.id,sentiment:'positive',topics:[{topic:'product',sentiment:'positive',evidence:'кофе вкусный'}]}));}});
+      const runs=async()=>(await pool.query('SELECT * FROM scheduled_runs WHERE project_id=$1 ORDER BY id',[project])).rows;
+      const notices=async()=>Number((await pool.query('SELECT count(*) FROM telegram_outbox WHERE scheduled_run_id IN(SELECT id FROM scheduled_runs WHERE project_id=$1)',[project])).rows[0].count);
+      await due();await Promise.all([tick(),tick()]);assert.equal((await runs()).length,1);assert.equal((await pool.query('SELECT count(*) FROM scheduled_collections WHERE project_id=$1',[project])).rows[0].count,'2');
+      assert.match(await cmd(919191,'/collect'),/Автообновление уже выполняется/);
+      await collector.processNext();await collector.processNext();await tick();assert.equal((await runs())[0].phase,'analysis');
+      await analyzer.processNext();await tick();assert.equal((await runs())[0].status,'partial');assert.equal(await notices(),1);assert.equal(modelCalls,1);
+      const document=(await pool.query('SELECT document_text FROM telegram_outbox WHERE scheduled_run_id=$1',[(await runs())[0].id])).rows[0].document_text;assert.ok(document.includes('# Репутационный аудит'));
+      // Every tick uses a new service instance: no in-memory checkpoint is required.
+      mode='captcha';for(let repeat=0;repeat<2;repeat++){await due();await tick();await collector.processNext();await collector.processNext();await tick();}
+      assert.equal((await runs()).at(-1).status,'failed');assert.equal(await notices(),2);assert.equal(modelCalls,1);
+      mode='normal';await due();await tick();await collector.processNext();await collector.processNext();await tick();assert.equal(await notices(),3);assert.equal(modelCalls,1);
+      const recovery=(await pool.query('SELECT text FROM telegram_outbox WHERE scheduled_run_id=$1',[(await runs()).at(-1).id])).rows[0].text;assert.match(recovery,/восстановлен/);
+      mode='partial';await due();await tick();await collector.processNext();await collector.processNext();await tick();assert.equal((await runs()).at(-1).status,'partial');assert.equal(await notices(),4);
+      mode='normal';await due();await tick();const timeoutRun=(await runs()).at(-1);await pool.query("UPDATE scheduled_runs SET started_at=now()-interval '13 hours' WHERE id=$1",[timeoutRun.id]);await tick();assert.equal((await runs()).at(-1).error_code,'timeout');
+      assert.equal((await pool.query("SELECT count(*) FROM collection_runs WHERE id IN(SELECT collection_run_id FROM scheduled_collections WHERE scheduled_run_id=$1) AND status IN ('pending','running')",[timeoutRun.id])).rows[0].count,'0');
+      const count=await notices();await tick();assert.equal(await notices(),count);
+      await cmd(919191,'/schedule off');await due();await tick();assert.equal((await runs()).length,6);assert.equal((await pool.query('SELECT enabled FROM project_schedules WHERE project_id=$1',[project])).rows[0].enabled,false);
+      assert.equal(calls,10);
+      // A manual audit postpones dispatch without losing the scheduled slot.
+      await cmd(919191,'/schedule 09:00 UTC');
+      const manual=(await pool.query("INSERT INTO audit_runs(project_id,stage) VALUES($1,'analysis') RETURNING id",[project])).rows[0].id;
+      await due();await tick();assert.equal((await runs()).length,6);
+      assert.ok(new Date((await pool.query('SELECT next_attempt_at FROM project_schedules WHERE project_id=$1',[project])).rows[0].next_attempt_at)>now);
+      await pool.query("UPDATE audit_runs SET status='failed' WHERE id=$1",[manual]);await pool.query('UPDATE project_schedules SET next_attempt_at=$2 WHERE project_id=$1',[project,now]);await tick();assert.equal((await runs()).length,7);
+      // Switching away from the project must cancel its children, not notify a stale profile.
+      const beforeSwitch=await notices();await pool.query('DELETE FROM telegram_profiles WHERE project_id=$1',[project]);await tick();assert.equal((await runs()).at(-1).error_code,'settings_changed');assert.equal(await notices(),beforeSwitch);
+      assert.equal((await pool.query("SELECT count(*) FROM collection_runs WHERE project_id=$1 AND status IN ('pending','running')",[project])).rows[0].count,'0');
     });
     await t.test('production entry point starts and shuts down cleanly',async()=>{
       const httpPort=await freePort();

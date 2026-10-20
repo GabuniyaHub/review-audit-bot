@@ -20,7 +20,7 @@ ADB="$ANDROID_SDK_ROOT/platform-tools/adb"
 "$ADB" -s "${ANDROID_SERIAL:-emulator-5554}" install --no-incremental -r build/reputation-audit.apk
 "$ADB" -s "${ANDROID_SERIAL:-emulator-5554}" install --no-incremental -r build/test.apk
 # This test resets only the app's database on the explicitly selected test device.
-audit_test_result=$("$ADB" -s "${ANDROID_SERIAL:-emulator-5554}" shell am instrument -w ru.reputation.audit.test/ru.reputation.audit.AuditInstrumentation)
+audit_test_result=$("$ADB" -s "${ANDROID_SERIAL:-emulator-5554}" shell am instrument -w -e live "${ANDROID_LIVE_LLM:-true}" ru.reputation.audit.test/ru.reputation.audit.AuditInstrumentation)
 printf '%s\n' "$audit_test_result"
 case "$audit_test_result" in
   *"result=PASS:"*) ;;

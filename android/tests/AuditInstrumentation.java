@@ -20,6 +20,7 @@ import java.nio.file.Files;
 public class AuditInstrumentation extends Instrumentation {
   private Activity activity;
   private WebView web;
+  private boolean liveLlm = true;
   private String evaluation(String script) throws Exception {
     CountDownLatch latch=new CountDownLatch(1); String[] result={null};
     runOnMainSync(() -> web.evaluateJavascript(script,value -> { result[0]=value; latch.countDown(); }));
@@ -36,7 +37,7 @@ public class AuditInstrumentation extends Instrumentation {
     File directory=getTargetContext().getExternalFilesDir(null);
     try(FileOutputStream output=new FileOutputStream(new File(directory,name))) { image.compress(Bitmap.CompressFormat.PNG,100,output); }
   }
-  @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); start(); }
+  @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); liveLlm = arguments == null || !"false".equals(arguments.getString("live", "true")); start(); }
   @Override public void onStart() {
     Bundle results=new Bundle();
     try {
@@ -58,7 +59,7 @@ public class AuditInstrumentation extends Instrumentation {
       until("window.testResult !== null","true");
       String encoded=evaluation("window.testResult"); String decoded=(String)new JSONArray("["+encoded+"]").get(0);
       JSONObject stored=new JSONObject(decoded);
-      if(stored.getInt("reviews")!=512 || stored.getInt("analyzed")!=512 || stored.getInt("reports")!=1 || !stored.getBoolean("key")) throw new Exception("SQLite persistence mismatch: "+stored);
+      if(stored.getInt("reviews")!=512 || stored.getInt("analyzed")!=512 || stored.getInt("reports")!=1 || (liveLlm && !stored.getBoolean("key"))) throw new Exception("SQLite persistence mismatch: "+stored);
       // Reopen the activity and confirm that SQLite data survives a fresh WebView.
       runOnMainSync(()->activity.finish());
       activity=startActivitySync(intent); web=(WebView)field.get(activity);
@@ -73,8 +74,10 @@ public class AuditInstrumentation extends Instrumentation {
       until("!!document.querySelector('#model-choice')","true");
       evaluation("var select=document.querySelector('#model-choice');select.value='nvidia/nemotron-3.5-lightning:free';select.dispatchEvent(new Event('change',{bubbles:true}))");
       until("document.querySelector('.model-name').innerText === 'nvidia/nemotron-3.5-lightning:free'","true");
-      evaluation("document.querySelector('[data-action=test-llm]').click()");
-      until("document.querySelector('#task').hidden && document.querySelector('#toast').innerText.includes('ИИ работает')","true");
+      if (liveLlm) {
+        evaluation("document.querySelector('[data-action=test-llm]').click()");
+        until("document.querySelector('#task').hidden && document.querySelector('#toast').innerText.includes('ИИ работает')","true");
+      }
       screenshot("06-settings.png");
       File exported=new File(getTargetContext().getCacheDir(),"export-test.md");
       IntentFilter exportFilter=new IntentFilter(Intent.ACTION_CREATE_DOCUMENT); exportFilter.addCategory(Intent.CATEGORY_OPENABLE); exportFilter.addDataType("*/*");
@@ -89,7 +92,7 @@ public class AuditInstrumentation extends Instrumentation {
       ActivityMonitor importMonitor=addMonitor(importFilter,new ActivityResult(Activity.RESULT_OK,new Intent().setData(Uri.fromFile(imported))),true);
       evaluation("window.importTest=null; Native.call('import').then(text=>window.importTest=JSON.parse(text).reviews[0].text).catch(e=>window.importTest=e.message)");
       until("window.importTest === 'Импорт: кофе вкусный'","true"); removeMonitor(importMonitor);
-      results.putString("result","PASS: APK launch, native bridge, 512 review analysis, report, SQLite persistence, activity recreation, four companies, mobile review pagination, bundled key, selected fallback model, real OpenRouter request from Android, import/export native document callbacks and UTF-8.");
+      results.putString("result","PASS: APK launch, native bridge, 512 review analysis, report, SQLite persistence, activity recreation, four companies, mobile review pagination, selected fallback model, import/export native document callbacks and UTF-8. Live OpenRouter: " + (liveLlm ? "verified" : "not requested (offline CI)"));
       finish(Activity.RESULT_OK,results);
     } catch(Throwable error) {
       results.putString("error",error.getClass().getSimpleName()+": "+error.getMessage());

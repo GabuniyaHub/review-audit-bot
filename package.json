@@ -15,7 +15,9 @@
     "db:migrate": "npm run build && node dist/src/database/migrate.js",
     "test": "npm run build && node --test dist/test/*.test.js",
     "test:integration": "npm run build && node --test dist/test/integration/*.test.js",
-    "db:migrate:prod": "node dist/src/database/migrate.js"
+    "db:migrate:prod": "node dist/src/database/migrate.js",
+    "android:build": "bash android/build.sh",
+    "android:test": "node --test android/tests/*.test.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.1.3",

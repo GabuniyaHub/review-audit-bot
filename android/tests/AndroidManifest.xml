@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="ru.reputation.audit.test">
+  <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+  <instrumentation android:name="ru.reputation.audit.AuditInstrumentation" android:targetPackage="ru.reputation.audit" android:label="Audit Android smoke tests" />
+  <application android:label="Audit tests" />
+</manifest>

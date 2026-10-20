@@ -1,0 +1,18 @@
+{
+  "reviews": [
+    {
+      "text": "кофе вкусный, но заказ ждал долго.",
+      "rating": 3,
+      "source": "import",
+      "externalId": "example-1",
+      "publishedAt": "2026-10-19T10:00:00Z"
+    },
+    {
+      "text": "обслуживание отличное, сотрудники вежливые.",
+      "rating": 5,
+      "source": "import",
+      "externalId": "example-2",
+      "publishedAt": "2026-10-18T12:00:00Z"
+    }
+  ]
+}

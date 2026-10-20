@@ -8,3 +8,10 @@ coverage/
 __pycache__/
 data/
 *.log
+android/build/
+android/local.properties
+android/secrets.properties
+android/*.keystore
+android/*.jks
+*.apk
+*.idsig

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#f5f7fa" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Репутация — мобильный аудит</title>
+    <link rel="stylesheet" href="app.css" />
+    <script src="core.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a href="#home" class="brand"
+        ><span class="brand-mark">↗</span>репутация<span class="brand-dot"
+          >.</span
+        ></a
+      ><button
+        class="icon-button"
+        id="settings-shortcut"
+        aria-label="Настройки"
+      >
+        ⚙
+      </button>
+    </header>
+    <main id="content">
+      <div class="loading">Открываем локальную базу…</div>
+    </main>
+    <nav id="navigation" aria-label="Разделы приложения"></nav>
+    <div id="task" hidden role="status" aria-live="polite"></div>
+    <div id="toast" hidden role="status" aria-live="polite"></div>
+    <div id="modal-root"></div>
+  </body>
+</html>
